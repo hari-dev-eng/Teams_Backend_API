@@ -1,4 +1,6 @@
-﻿namespace TeamsMeetingViewer.Models
+﻿using OutLook_Events;
+
+namespace TeamsMeetingViewer.Models
 {
     public class MeetingViewModel
     {
@@ -6,7 +8,9 @@
         public string? StartTime { get; set; }
         public string? EndTime { get; set; }
         public string? Organizer { get; set; }
-        public string? OrganizerEmail { get; internal set; }
-        public string? Location { get; internal set; }
+        public string? OrganizerEmail { get; set; }
+        public string? Location { get; set; }
+
+        public int AttendeeCount { get; set; }
     }
 }

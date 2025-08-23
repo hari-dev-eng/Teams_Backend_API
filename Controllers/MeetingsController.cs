@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.Identity.Client;
 using Newtonsoft.Json.Linq;
 using TeamsMeetingViewer.Models;
+using System.Collections.Concurrent;
 
 namespace OutLook_Events
 {
@@ -12,89 +13,57 @@ namespace OutLook_Events
     {
         private readonly IConfiguration _config;
         private readonly ILogger<MeetingsController> _logger;
+        private readonly IHttpClientFactory _httpClientFactory;
 
-        public MeetingsController(IConfiguration config, ILogger<MeetingsController> logger)
+        public MeetingsController(IConfiguration config, ILogger<MeetingsController> logger, IHttpClientFactory httpClientFactory)
         {
             _config = config;
             _logger = logger;
+            _httpClientFactory = httpClientFactory;
         }
 
         [HttpGet]
-        public async Task<IActionResult> GetMeetings([FromQuery] string userEmail)
+        public async Task<IActionResult> GetMeetings([FromQuery] string[] userEmails, [FromQuery] string date = null)
         {
             var meetings = new List<MeetingViewModel>();
 
-            // Validate input
-            if (string.IsNullOrWhiteSpace(userEmail) || !userEmail.Contains("@"))
+            // If no emails provided, use the default 4 emails
+            if (userEmails == null || userEmails.Length == 0)
             {
-                return BadRequest(new { status = "failure", message = "Invalid or missing email address." });
+                userEmails = new string[] {
+                    "gfmeeting@conservesolution.com",
+                    "ffmeeting@conservesolution.com",
+                      "contconference@conservesolution.com",
+                      "sfmeeting@conservesolution.com"
+                };
             }
+
+            if (userEmails.Any(e => !e.Contains("@")))
+                return BadRequest(new { status = "failure", message = "Invalid email addresses." });
 
             try
             {
-                // Load secrets securely from appsettings.json / environment variables
-                string clientId = _config["AzureAd:ClientId"] ?? throw new Exception("Missing ClientId");
-                string clientSecret = _config["AzureAd:ClientSecret"] ?? throw new Exception("Missing ClientSecret");
-                string tenantId = _config["AzureAd:TenantId"] ?? throw new Exception("Missing TenantId");
+                string clientId = _config["AzureAd:ClientId"];
+                string clientSecret = _config["AzureAd:ClientSecret"];
+                string tenantId = _config["AzureAd:TenantId"];
                 string[] scopes = new[] { "https://graph.microsoft.com/.default" };
 
-                // Authenticate
                 IConfidentialClientApplication app = ConfidentialClientApplicationBuilder.Create(clientId)
                     .WithClientSecret(clientSecret)
                     .WithAuthority($"https://login.microsoftonline.com/{tenantId}")
                     .Build();
 
-                AuthenticationResult result;
-                try
-                {
-                    result = await app.AcquireTokenForClient(scopes).ExecuteAsync();
-                }
-                catch (Exception authEx)
-                {
-                    _logger.LogError(authEx, "Failed to acquire Graph API token");
-                    return StatusCode(401, new { status = "failure", message = "Unauthorized. Token acquisition failed." });
-                }
+                var result = await app.AcquireTokenForClient(scopes).ExecuteAsync();
 
-                // Graph API call
-                using var client = new HttpClient();
-                client.DefaultRequestHeaders.Authorization =
-                    new AuthenticationHeaderValue("Bearer", result.AccessToken);
-
-                string endpoint = $"https://graph.microsoft.com/v1.0/users/{Uri.EscapeDataString(userEmail)}/events?$top=50&$orderby=start/dateTime";
-                HttpResponseMessage response = await client.GetAsync(endpoint);
-
-                if (!response.IsSuccessStatusCode)
-                {
-                    _logger.LogWarning("Graph API returned {StatusCode} for {Email}", response.StatusCode, userEmail);
-                    return StatusCode((int)response.StatusCode, new
-                    {
-                        status = "failure",
-                        message = "Graph API call failed",
-                        details = await response.Content.ReadAsStringAsync()
-                    });
-                }
-
-                string json = await response.Content.ReadAsStringAsync();
-                JObject parsed;
-                try
-                {
-                    parsed = JObject.Parse(json);
-                }
-                catch (Exception parseEx)
-                {
-                    _logger.LogError(parseEx, "Failed to parse Graph API response");
-                    return StatusCode(500, new { status = "failure", message = "Invalid response format from Graph API" });
-                }
-
-                var events = parsed["value"];
-                if (events == null || !events.Any())
-                {
-                    return Ok(new { status = "success", message = "No meetings found", meetings = new List<MeetingViewModel>() });
-                }
-
-                // Time zone conversion
+                // Time zone setup
                 TimeZoneInfo istZone = TimeZoneInfo.FindSystemTimeZoneById("India Standard Time");
-                var todayIst = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, istZone).Date;
+
+                // Parse date from query OR fallback to today
+                DateTime selectedDateIst;
+                if (!string.IsNullOrEmpty(date) && DateTime.TryParse(date, out var parsedDate))
+                    selectedDateIst = parsedDate.Date;
+                else
+                    selectedDateIst = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, istZone).Date;
 
                 var allowedLocations = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
                 {
@@ -104,34 +73,85 @@ namespace OutLook_Events
                     "3rd Floor Meeting Room"
                 };
 
-                foreach (var ev in events)
+                // Fetch meetings from all emails in parallel
+                var allMeetings = new ConcurrentBag<MeetingViewModel>();
+
+                // Create a list of tasks for all email requests
+                var tasks = userEmails.Select(async email =>
                 {
-                    var location = ev.SelectToken("location.displayName")?.ToString()?.Trim();
-                    if (string.IsNullOrWhiteSpace(location) || !allowedLocations.Contains(location))
-                        continue;
-
-                    if (!DateTime.TryParse(ev.SelectToken("start.dateTime")?.ToString(), out var startUtc) ||
-                        !DateTime.TryParse(ev.SelectToken("end.dateTime")?.ToString(), out var endUtc))
-                        continue;
-
-                    DateTime startIst = TimeZoneInfo.ConvertTimeFromUtc(startUtc, istZone);
-                    DateTime endIst = TimeZoneInfo.ConvertTimeFromUtc(endUtc, istZone);
-
-                    // THIS IS THE FIX: Only skip past meetings
-                    if (startIst.Date < todayIst)
-                        continue;
-
-                    meetings.Add(new MeetingViewModel
+                    try
                     {
-                        Subject = ev["subject"]?.ToString(),
-                        StartTime = startIst.ToString("yyyy-MM-ddTHH:mm:ss"),
-                        EndTime = endIst.ToString("yyyy-MM-ddTHH:mm:ss"),
-                        Organizer = ev.SelectToken("organizer.emailAddress.name")?.ToString(),
-                        OrganizerEmail = ev.SelectToken("organizer.emailAddress.address")?.ToString(),
-                        Location = location
-                    });
-                }
+                        // Create a new HttpClient for each request (better for parallel execution)
+                        using var httpClient = _httpClientFactory.CreateClient();
+                        httpClient.DefaultRequestHeaders.Authorization =
+                            new AuthenticationHeaderValue("Bearer", result.AccessToken);
 
+                        string endpoint = $"https://graph.microsoft.com/v1.0/users/{Uri.EscapeDataString(email)}/events?$top=50&$orderby=start/dateTime";
+                        var response = await httpClient.GetAsync(endpoint);
+
+                        if (!response.IsSuccessStatusCode)
+                        {
+                            _logger.LogWarning($"Failed to fetch events for {email}: {response.StatusCode}");
+                            return;
+                        }
+
+                        var json = await response.Content.ReadAsStringAsync();
+                        var parsed = JObject.Parse(json);
+                        var events = parsed["value"];
+
+                        if (events == null || !events.Any())
+                            return;
+
+                        foreach (var ev in events)
+                        {
+                            var location = ev.SelectToken("location.displayName")?.ToString()?.Trim();
+                            if (string.IsNullOrWhiteSpace(location) || !allowedLocations.Contains(location))
+                                continue;
+
+                            if (!DateTime.TryParse(ev.SelectToken("start.dateTime")?.ToString(), out var startUtc) ||
+                                !DateTime.TryParse(ev.SelectToken("end.dateTime")?.ToString(), out var endUtc))
+                                continue;
+
+                            DateTime startIst = TimeZoneInfo.ConvertTimeFromUtc(startUtc, istZone);
+                            DateTime endIst = TimeZoneInfo.ConvertTimeFromUtc(endUtc, istZone);
+
+                            // Only meetings for the selected date
+                            if (startIst.Date != selectedDateIst)
+                                continue;
+
+                            // Get the attendees JSON array
+                            var attendeesToken = ev.SelectToken("attendees");
+
+                            // Calculate the attendee count
+                            int attendeeCount = 0;
+                            if (attendeesToken is JArray attendeesArray)
+                            {
+                                attendeeCount = attendeesArray.Count;
+                            }
+
+                            allMeetings.Add(new MeetingViewModel
+                            {
+                                Subject = ev["subject"]?.ToString(),
+                                StartTime = startIst.ToString("yyyy-MM-ddTHH:mm:ss"),
+                                EndTime = endIst.ToString("yyyy-MM-ddTHH:mm:ss"),
+                                Organizer = ev.SelectToken("organizer.emailAddress.name")?.ToString(),
+                                OrganizerEmail = ev.SelectToken("organizer.emailAddress.address")?.ToString(),
+                                Location = location,
+                                AttendeeCount = attendeeCount
+                            });
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, $"Error processing events for {email}");
+                    }
+                });
+
+                // Wait for all email requests to complete
+                await Task.WhenAll(tasks);
+
+                // Convert to list and order by start time
+                meetings = allMeetings.OrderBy(m => m.StartTime).ToList();
 
                 return Ok(new { status = "success", count = meetings.Count, meetings });
             }
