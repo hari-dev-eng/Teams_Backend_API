@@ -1,0 +1,4 @@
+{
+    "build": "dotnet publish -c Release -o ./publish",
+    "start": "dotnet ./publish/Teams_Backend_API.dll"
+}
