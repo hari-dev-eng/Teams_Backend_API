@@ -12,7 +12,21 @@ builder.Services.AddCors(options =>
 {
     options.AddPolicy("AllowReactApp", policy =>
     {
-        policy.WithOrigins("http://localhost:3000", "http://localhost:3001", "http://localhost:3002")
+        builder.Services.AddCors(options =>
+{
+    options.AddPolicy("AllowReactApp", policy =>
+    {
+        policy.WithOrigins(
+                "http://localhost:3000",
+                "http://localhost:3001",
+                "http://localhost:3002",
+                "https://teams-meeting-web.vercel.app"
+            )
+            .AllowAnyHeader()
+            .AllowAnyMethod();
+    });
+});
+
               .AllowAnyHeader()
               .AllowAnyMethod();
     });
