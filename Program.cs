@@ -20,7 +20,7 @@ builder.Services.AddCors(options =>
                 "http://localhost:3000",
                 "http://localhost:3001",
                 "http://localhost:3002",
-                "https://teams-meeting-web.vercel.app"
+                "https://teams-meeting-6nqqa3u12-hari-dev-engs-projects.vercel.app/"
             )
             .AllowAnyHeader()
             .AllowAnyMethod();
