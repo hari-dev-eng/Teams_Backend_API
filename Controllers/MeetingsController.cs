@@ -1,12 +1,23 @@
-﻿using System.Net.Http.Headers;
+﻿using System.Globalization;
+using System.Net.Http.Headers;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Identity.Client;
 using Newtonsoft.Json.Linq;
-using TeamsMeetingViewer.Models;
 using System.Collections.Concurrent;
 
 namespace OutLook_Events
 {
+    public class MeetingViewModel
+    {
+        public string? Subject { get; set; }
+        public string? StartTime { get; set; }   // "yyyy-MM-ddTHH:mm:ss" (IST)
+        public string? EndTime { get; set; }     // "yyyy-MM-ddTHH:mm:ss" (IST)
+        public string? Organizer { get; set; }
+        public string? OrganizerEmail { get; set; }
+        public string? Location { get; set; }
+        public int AttendeeCount { get; set; }
+    }
+
     [Route("api/[controller]")]
     [ApiController]
     public class MeetingsController : ControllerBase
@@ -15,7 +26,10 @@ namespace OutLook_Events
         private readonly ILogger<MeetingsController> _logger;
         private readonly IHttpClientFactory _httpClientFactory;
 
-        public MeetingsController(IConfiguration config, ILogger<MeetingsController> logger, IHttpClientFactory httpClientFactory)
+        public MeetingsController(
+            IConfiguration config,
+            ILogger<MeetingsController> logger,
+            IHttpClientFactory httpClientFactory)
         {
             _config = config;
             _logger = logger;
@@ -23,47 +37,84 @@ namespace OutLook_Events
         }
 
         [HttpGet]
-        public async Task<IActionResult> GetMeetings([FromQuery] string[] userEmails, [FromQuery] string date = null)
+        public async Task<IActionResult> GetMeetings(
+            [FromQuery(Name = "userEmails")] string[]? userEmails,
+            [FromQuery] string? date = null)
         {
-            var meetings = new List<MeetingViewModel>();
+            // Fallback if client sends userEmail instead of userEmails (backward compat)
+            if ((userEmails == null || userEmails.Length == 0) && Request.Query.TryGetValue("userEmail", out var single))
+            {
+                userEmails = new[] { single.ToString() };
+            }
 
-            // If no emails provided, use the default 4 emails
+            // Default emails if none are provided
             if (userEmails == null || userEmails.Length == 0)
             {
-                userEmails = new string[] {
+                userEmails = new[]
+                {
                     "gfmeeting@conservesolution.com",
                     "ffmeeting@conservesolution.com",
-                      "contconference@conservesolution.com",
-                      "sfmeeting@conservesolution.com"
+                    "contconference@conservesolution.com",
+                    "sfmeeting@conservesolution.com"
                 };
             }
 
             if (userEmails.Any(e => !e.Contains("@")))
                 return BadRequest(new { status = "failure", message = "Invalid email addresses." });
 
+            // Validate Azure AD config (prevents “works local, fails in host” when env vars are missing)
+            var clientId = _config["AzureAd:ClientId"];
+            var clientSecret = _config["AzureAd:ClientSecret"];
+            var tenantId = _config["AzureAd:TenantId"];
+            if (string.IsNullOrWhiteSpace(clientId) ||
+                string.IsNullOrWhiteSpace(clientSecret) ||
+                string.IsNullOrWhiteSpace(tenantId))
+            {
+                _logger.LogError("Azure AD configuration missing (ClientId/ClientSecret/TenantId).");
+                return StatusCode(500, new { status = "failure", message = "Azure AD configuration missing in server." });
+            }
+
             try
             {
-                string clientId = _config["AzureAd:ClientId"];
-                string clientSecret = _config["AzureAd:ClientSecret"];
-                string tenantId = _config["AzureAd:TenantId"];
-                string[] scopes = new[] { "https://graph.microsoft.com/.default" };
-
-                IConfidentialClientApplication app = ConfidentialClientApplicationBuilder.Create(clientId)
+                // Acquire Graph token (client credentials)
+                var scopes = new[] { "https://graph.microsoft.com/.default" };
+                IConfidentialClientApplication app = ConfidentialClientApplicationBuilder
+                    .Create(clientId)
                     .WithClientSecret(clientSecret)
                     .WithAuthority($"https://login.microsoftonline.com/{tenantId}")
                     .Build();
 
-                var result = await app.AcquireTokenForClient(scopes).ExecuteAsync();
+                var token = await app.AcquireTokenForClient(scopes).ExecuteAsync();
 
-                // Time zone setup
-                TimeZoneInfo istZone = TimeZoneInfo.FindSystemTimeZoneById("India Standard Time");
+                // Time handling — ASK GRAPH to return IST directly
+                const string OutlookTz = "India Standard Time";
+                var istZone = TimeZoneInfo.FindSystemTimeZoneById(OutlookTz);
 
-                // Parse date from query OR fallback to today
+                // Parse the requested date with multiple accepted formats
+                var acceptedFormats = new[]
+                {
+                    "dd-M-yyyy", "d-M-yyyy", "dd-MM-yyyy",
+                    "yyyy-MM-dd", "M/d/yyyy", "d/M/yyyy"
+                };
+
                 DateTime selectedDateIst;
-                if (!string.IsNullOrEmpty(date) && DateTime.TryParse(date, out var parsedDate))
-                    selectedDateIst = parsedDate.Date;
+                if (!string.IsNullOrWhiteSpace(date) &&
+                    DateTime.TryParseExact(date, acceptedFormats, CultureInfo.InvariantCulture,
+                        DateTimeStyles.None, out var parsed))
+                {
+                    // Treat parsed as IST calendar date (no time)
+                    selectedDateIst = parsed.Date;
+                }
                 else
+                {
                     selectedDateIst = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, istZone).Date;
+                }
+
+                // Build the start/end of day in IST (strings without zone; Graph will interpret as IST due to Prefer header)
+                var startOfDayIst = new DateTime(selectedDateIst.Year, selectedDateIst.Month, selectedDateIst.Day, 0, 0, 0);
+                var endOfDayIst = startOfDayIst.AddDays(1).AddSeconds(-1);
+
+                string fmt(DateTime dt) => dt.ToString("yyyy-MM-dd'T'HH:mm:ss"); // do NOT append 'Z'
 
                 var allowedLocations = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
                 {
@@ -73,34 +124,40 @@ namespace OutLook_Events
                     "3rd Floor Meeting Room"
                 };
 
-                // Fetch meetings from all emails in parallel
                 var allMeetings = new ConcurrentBag<MeetingViewModel>();
 
-                // Create a list of tasks for all email requests
+                // Query each mailbox in parallel using /calendarView (range-filtered) and IST preference
                 var tasks = userEmails.Select(async email =>
                 {
                     try
                     {
-                        // Create a new HttpClient for each request (better for parallel execution)
                         using var httpClient = _httpClientFactory.CreateClient();
                         httpClient.DefaultRequestHeaders.Authorization =
-                            new AuthenticationHeaderValue("Bearer", result.AccessToken);
+                            new AuthenticationHeaderValue("Bearer", token.AccessToken);
 
-                        string endpoint = $"https://graph.microsoft.com/v1.0/users/{Uri.EscapeDataString(email)}/events?$top=50&$orderby=start/dateTime";
+                        // Ask Graph to return times in IST so we don't perform any UTC conversion
+                        httpClient.DefaultRequestHeaders.Add("Prefer", $"outlook.timezone=\"{OutlookTz}\"");
+
+                        var endpoint =
+                            $"https://graph.microsoft.com/v1.0/users/{Uri.EscapeDataString(email)}/calendar/calendarView" +
+                            $"?startDateTime={Uri.EscapeDataString(fmt(startOfDayIst))}" +
+                            $"&endDateTime={Uri.EscapeDataString(fmt(endOfDayIst))}" +
+                            $"&$top=200&$orderby=start/dateTime" +
+                            "&$select=subject,organizer,start,end,location,attendees";
+
                         var response = await httpClient.GetAsync(endpoint);
 
                         if (!response.IsSuccessStatusCode)
                         {
-                            _logger.LogWarning($"Failed to fetch events for {email}: {response.StatusCode}");
+                            _logger.LogWarning("Graph request failed for {Email} with {Code}: {Reason}",
+                                email, (int)response.StatusCode, response.ReasonPhrase);
                             return;
                         }
 
                         var json = await response.Content.ReadAsStringAsync();
-                        var parsed = JObject.Parse(json);
-                        var events = parsed["value"];
-
-                        if (events == null || !events.Any())
-                            return;
+                        var parsedJson = JObject.Parse(json);
+                        var events = parsedJson["value"];
+                        if (events == null || !events.Any()) return;
 
                         foreach (var ev in events)
                         {
@@ -108,32 +165,26 @@ namespace OutLook_Events
                             if (string.IsNullOrWhiteSpace(location) || !allowedLocations.Contains(location))
                                 continue;
 
-                            if (!DateTime.TryParse(ev.SelectToken("start.dateTime")?.ToString(), out var startUtc) ||
-                                !DateTime.TryParse(ev.SelectToken("end.dateTime")?.ToString(), out var endUtc))
+                            // Times are already in IST due to Prefer header
+                            var startStr = ev.SelectToken("start.dateTime")?.ToString();
+                            var endStr = ev.SelectToken("end.dateTime")?.ToString();
+
+                            if (!DateTime.TryParse(startStr, out var startIst) ||
+                                !DateTime.TryParse(endStr, out var endIst))
                                 continue;
 
-                            DateTime startIst = TimeZoneInfo.ConvertTimeFromUtc(startUtc, istZone);
-                            DateTime endIst = TimeZoneInfo.ConvertTimeFromUtc(endUtc, istZone);
+                            // Extra guard: keep only the selected day (in case of multi-day events)
+                            if (startIst.Date != selectedDateIst) continue;
 
-                            // Only meetings for the selected date
-                            if (startIst.Date != selectedDateIst)
-                                continue;
-
-                            // Get the attendees JSON array
-                            var attendeesToken = ev.SelectToken("attendees");
-
-                            // Calculate the attendee count
                             int attendeeCount = 0;
-                            if (attendeesToken is JArray attendeesArray)
-                            {
-                                attendeeCount = attendeesArray.Count;
-                            }
+                            var attendeesToken = ev.SelectToken("attendees");
+                            if (attendeesToken is JArray arr) attendeeCount = arr.Count;
 
                             allMeetings.Add(new MeetingViewModel
                             {
                                 Subject = ev["subject"]?.ToString(),
-                                StartTime = startIst.ToString("yyyy-MM-ddTHH:mm:ss"),
-                                EndTime = endIst.ToString("yyyy-MM-ddTHH:mm:ss"),
+                                StartTime = startIst.ToString("yyyy-MM-dd'T'HH:mm:ss"),
+                                EndTime = endIst.ToString("yyyy-MM-dd'T'HH:mm:ss"),
                                 Organizer = ev.SelectToken("organizer.emailAddress.name")?.ToString(),
                                 OrganizerEmail = ev.SelectToken("organizer.emailAddress.address")?.ToString(),
                                 Location = location,
@@ -143,17 +194,22 @@ namespace OutLook_Events
                     }
                     catch (Exception ex)
                     {
-                        _logger.LogError(ex, $"Error processing events for {email}");
+                        _logger.LogError(ex, "Error fetching calendar for {Email}", email);
                     }
                 });
 
-                // Wait for all email requests to complete
                 await Task.WhenAll(tasks);
 
-                // Convert to list and order by start time
-                meetings = allMeetings.OrderBy(m => m.StartTime).ToList();
+                var meetings = allMeetings
+                    .OrderBy(m => m.StartTime, StringComparer.Ordinal)
+                    .ToList();
 
                 return Ok(new { status = "success", count = meetings.Count, meetings });
+            }
+            catch (MsalServiceException msalEx)
+            {
+                _logger.LogError(msalEx, "Azure AD token acquisition failed.");
+                return StatusCode(500, new { status = "failure", message = "Azure AD token acquisition failed." });
             }
             catch (Exception ex)
             {
