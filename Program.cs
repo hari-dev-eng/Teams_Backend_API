@@ -11,11 +11,11 @@ builder.Services.AddCors(options =>
     options.AddPolicy("AllowReactApp", policy =>
     {
         policy.WithOrigins(
+            "https://teams-meeting-6nqqa3u12-hari-dev-engs-projects.vercel.app",
+            "https://teams-meeting-web.vercel.app",
             "http://localhost:3000",
             "http://localhost:3001",
-            "http://localhost:3002",
-            "https://teams-meeting-6nqqa3u12-hari-dev-engs-projects.vercel.app",
-            "https://teams-meeting-web.vercel.app"
+            "http://localhost:3002"
         )
         .AllowAnyHeader()
         .AllowAnyMethod();
