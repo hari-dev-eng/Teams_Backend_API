@@ -52,10 +52,11 @@ namespace OutLook_Events
             {
                 userEmails = new[]
                 {
-                    "gfmeeting@conservesolution.com",
-                    "ffmeeting@conservesolution.com",
-                    "contconference@conservesolution.com",
-                    "sfmeeting@conservesolution.com"
+                      "ffmeeting@conservesolution.com",
+                      "gfmeeting@conservesolution.com",
+                      "sfmeeting@conservesolution.com",
+                      "contconference@conservesolution.com"
+
                 };
             }
 
@@ -161,6 +162,8 @@ namespace OutLook_Events
 
                         foreach (var ev in events)
                         {
+                            //_logger.LogInformation("Event data: {EventData}", ev.ToString());
+
                             var location = ev.SelectToken("location.displayName")?.ToString()?.Trim();
                             if (string.IsNullOrWhiteSpace(location) || !allowedLocations.Contains(location))
                                 continue;
@@ -180,13 +183,21 @@ namespace OutLook_Events
                             var attendeesToken = ev.SelectToken("attendees");
                             if (attendeesToken is JArray arr) attendeeCount = arr.Count;
 
+                            // Use consistent SelectToken approach for all properties
+                            var subjectStr = ev.SelectToken("subject")?.ToString();
+                            if (string.IsNullOrWhiteSpace(subjectStr))
+                                subjectStr = "[No Title]";
+
+                            var organizerName = ev.SelectToken("organizer.emailAddress.name")?.ToString();
+                            var organizerEmail = ev.SelectToken("organizer.emailAddress.address")?.ToString();
+
                             allMeetings.Add(new MeetingViewModel
                             {
-                                Subject = ev["subject"]?.ToString(),
+                                Subject = subjectStr,
                                 StartTime = startIst.ToString("yyyy-MM-dd'T'HH:mm:ss"),
                                 EndTime = endIst.ToString("yyyy-MM-dd'T'HH:mm:ss"),
-                                Organizer = ev.SelectToken("organizer.emailAddress.name")?.ToString(),
-                                OrganizerEmail = ev.SelectToken("organizer.emailAddress.address")?.ToString(),
+                                Organizer = organizerName,
+                                OrganizerEmail = organizerEmail,
                                 Location = location,
                                 AttendeeCount = attendeeCount
                             });
