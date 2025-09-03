@@ -6,6 +6,7 @@ using Teams_Backend_API.Models.DTOs;
 using Microsoft.Graph.Models;
 using Microsoft.Graph.Models.ODataErrors;
 using Microsoft.Identity.Client;
+using Azure.Core;
 
 namespace Teams_Backend_API.Controllers;
 
@@ -48,7 +49,7 @@ public class BookingsController : ControllerBase
             {
                 return BadRequest(new { error = "UserEmail and RoomEmail are required" });
             }
-
+            if (dto == null) return BadRequest("Request body is null || No data sent to API");
             // Build attendees list dynamically
             var attendees = new List<Attendee>
             {
@@ -92,8 +93,21 @@ public class BookingsController : ControllerBase
                         });
                     }
                 }
-
             }
+
+            //response options update
+            if (!Enum.TryParse<FreeBusyStatus>(dto.category, out var showAsStatus))
+            {
+                // If parsing fails, default to 'Busy'
+                showAsStatus = FreeBusyStatus.Oof;
+            }
+
+            // --- NEW: Handle the Reminder option directly ---
+            // Assuming dto.Reminder is now an integer from the frontend (0 for None, >0 otherwise)
+            int reminderMinutesBeforeStart = dto.reminder;
+
+            // The IsReminderOn property should be true only if the reminder value is greater than zero.
+            bool isReminderOn = dto.reminder > 0;
 
             // Create event
             var @event = new Event
@@ -121,7 +135,11 @@ public class BookingsController : ControllerBase
                 },
                 Attendees = attendees,
                 IsOnlineMeeting = false,
-                AllowNewTimeProposals = false
+                AllowNewTimeProposals = false,
+
+                ShowAs = showAsStatus,
+                IsReminderOn = isReminderOn,
+                ReminderMinutesBeforeStart = reminderMinutesBeforeStart
             };
 
             // Create the event in the user's calendar
@@ -138,8 +156,12 @@ public class BookingsController : ControllerBase
                 end = createdEvent.End,
                 location = createdEvent.Location?.DisplayName,
                 locationEmail = createdEvent.Location?.LocationEmailAddress,
-                onlineMeetingUrl = createdEvent.OnlineMeeting?.JoinUrl
+                onlineMeetingUrl = createdEvent.OnlineMeeting?.JoinUrl,
+                showAs = createdEvent.ShowAs,
+                isReminderOn = createdEvent.IsReminderOn,
+                reminderMinutesBeforeStart = createdEvent.ReminderMinutesBeforeStart
             });
+
         }
         catch (ODataError ex)
         {
