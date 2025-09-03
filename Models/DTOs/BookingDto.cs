@@ -9,11 +9,15 @@
         public string ?Location { get; set; }
         public string ?UserEmail { get; set; }
         public string ?RoomEmail { get; set; }
+
         public List<AttendeeDto>? Attendees { get; set; }
         public string? category { get; set; }
         public int reminder { get; set; }
         public bool isallday { get; set; }
         public bool isrecurring { get; set; }
+
+       
+
     }
 
 }
