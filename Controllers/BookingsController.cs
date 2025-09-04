@@ -43,26 +43,14 @@ public class BookingsController : ControllerBase
 
             var userEmail = dto.UserEmail;
             var roomEmail = dto.RoomEmail;
-            var userName = userEmail.Split('@')[0];
 
             if (string.IsNullOrEmpty(userEmail) || string.IsNullOrEmpty(roomEmail))
             {
                 return BadRequest(new { error = "UserEmail and RoomEmail are required" });
             }
 
-            // Build attendees list with only user + extra attendees (NOT room)
-            var attendees = new List<Attendee>
-            {
-                new Attendee
-                {
-                    EmailAddress = new EmailAddress
-                    {
-                        Address = userEmail,
-                        Name = userName
-                    },
-                    Type = AttendeeType.Required
-                }
-            };
+            // Collect attendees (excluding organizer & room)
+            var attendees = new List<Attendee>();
 
             if (dto.Attendees != null && dto.Attendees.Any())
             {
@@ -93,6 +81,9 @@ public class BookingsController : ControllerBase
             int reminderMinutesBeforeStart = dto.Reminder;
             bool isReminderOn = dto.Reminder > 0;
 
+            // --- Store in IST instead of UTC ---
+            const string OutlookTz = "India Standard Time";
+
             var @event = new Event
             {
                 Subject = dto.Title,
@@ -104,18 +95,20 @@ public class BookingsController : ControllerBase
                 Start = new DateTimeTimeZone
                 {
                     DateTime = dto.StartTime.ToString("yyyy-MM-ddTHH:mm:ss"),
-                    TimeZone = "Asia/Kolkata"
+                    TimeZone = OutlookTz
                 },
                 End = new DateTimeTimeZone
                 {
                     DateTime = dto.EndTime.ToString("yyyy-MM-ddTHH:mm:ss"),
-                    TimeZone = "Asia/Kolkata"
+                    TimeZone = OutlookTz
                 },
+                // ✅ Correct location assignment
                 Location = new Location
                 {
                     DisplayName = dto.RoomName,
                     LocationEmailAddress = roomEmail
                 },
+                // ✅ Attendees only = people invited (NOT organizer, NOT room)
                 Attendees = attendees,
                 IsOnlineMeeting = false,
                 AllowNewTimeProposals = false,
@@ -124,7 +117,7 @@ public class BookingsController : ControllerBase
                 ReminderMinutesBeforeStart = reminderMinutesBeforeStart
             };
 
-            // ✅ Save event in user's calendar
+            // Organizer = userEmail
             var createdEvent = await _graphClient.Users[userEmail]
                 .Calendar
                 .Events
@@ -170,32 +163,5 @@ public class BookingsController : ControllerBase
 
         var token = await app.AcquireTokenForClient(scopes).ExecuteAsync();
         return Ok(new { access_token = token.AccessToken });
-    }
-
-    [HttpGet("rooms")]
-    [AllowAnonymous]
-    public async Task<IActionResult> GetAvailableRooms()
-    {
-        try
-        {
-            var rooms = await _graphClient.Users
-                .GetAsync(requestConfiguration =>
-                {
-                    requestConfiguration.QueryParameters.Filter = "userType eq 'Room'";
-                    requestConfiguration.QueryParameters.Select = new[] { "id", "displayName", "mail", "officeLocation" };
-                });
-
-            return Ok(rooms?.Value?.Select(r => new
-            {
-                id = r.Id,
-                displayName = r.DisplayName,
-                email = r.Mail,
-                officeLocation = r.OfficeLocation
-            }));
-        }
-        catch (ODataError ex)
-        {
-            return BadRequest(new { error = ex.Error?.Message });
-        }
     }
 }
