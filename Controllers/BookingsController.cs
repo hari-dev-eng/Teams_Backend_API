@@ -33,14 +33,14 @@ public class BookingsController : ControllerBase
         _graphClient = new GraphServiceClient(clientSecretCredential);
     }
 
-    public object Configuration { get; private set; }
-
     [HttpPost]
     //[Authorize]
     public async Task<IActionResult> Create([FromBody] BookingDto dto)
     {
         try
         {
+            if (dto == null) return BadRequest("Request body is null || No data sent to API");
+
             var userEmail = dto.UserEmail;
             var roomEmail = dto.RoomEmail;
             var userName = userEmail.Split('@')[0];
@@ -49,21 +49,10 @@ public class BookingsController : ControllerBase
             {
                 return BadRequest(new { error = "UserEmail and RoomEmail are required" });
             }
-            if (dto == null) return BadRequest("Request body is null || No data sent to API");
-            // Build attendees list dynamically
+
+            // Build attendees list with only user + extra attendees (NOT room)
             var attendees = new List<Attendee>
             {
-                // Room attendee
-                new Attendee
-                {
-                    EmailAddress = new EmailAddress
-                    {
-                        Address = roomEmail,
-                        Name = dto.Location
-                    },
-                    Type = AttendeeType.Required
-                },
-                // Organizer attendee
                 new Attendee
                 {
                     EmailAddress = new EmailAddress
@@ -75,7 +64,6 @@ public class BookingsController : ControllerBase
                 }
             };
 
-            // Add extra attendees if provided
             if (dto.Attendees != null && dto.Attendees.Any())
             {
                 foreach (var att in dto.Attendees)
@@ -95,21 +83,16 @@ public class BookingsController : ControllerBase
                 }
             }
 
-            //response options update
+            // FreeBusy status
             if (!Enum.TryParse<FreeBusyStatus>(dto.Category, out var showAsStatus))
             {
-                // If parsing fails, default to 'Busy'
-                showAsStatus = FreeBusyStatus.Oof;
+                showAsStatus = FreeBusyStatus.Busy;
             }
 
-            // --- NEW: Handle the Reminder option directly ---
-            // Assuming dto.Reminder is now an integer from the frontend (0 for None, >0 otherwise)
+            // Reminder
             int reminderMinutesBeforeStart = dto.Reminder;
-
-            // The IsReminderOn property should be true only if the reminder value is greater than zero.
             bool isReminderOn = dto.Reminder > 0;
 
-            // Create event
             var @event = new Event
             {
                 Subject = dto.Title,
@@ -121,32 +104,19 @@ public class BookingsController : ControllerBase
                 Start = new DateTimeTimeZone
                 {
                     DateTime = dto.StartTime.ToString("yyyy-MM-ddTHH:mm:ss"),
-                    TimeZone = "UTC"
+                    TimeZone = "Asia/Kolkata"
                 },
                 End = new DateTimeTimeZone
                 {
                     DateTime = dto.EndTime.ToString("yyyy-MM-ddTHH:mm:ss"),
-                    TimeZone = "UTC"
+                    TimeZone = "Asia/Kolkata"
                 },
                 Location = new Location
                 {
                     DisplayName = dto.RoomName,
                     LocationEmailAddress = roomEmail
                 },
-                Attendees = new List<Attendee>
-    {
-        new Attendee
-        {
-            EmailAddress = new EmailAddress
-            {
-                Address = roomEmail,
-                Name = dto.RoomName
-            },
-            Type = AttendeeType.Resource
-        }
-    }
-     .Concat(attendees) // add user + extra attendees
-     .ToList(),
+                Attendees = attendees,
                 IsOnlineMeeting = false,
                 AllowNewTimeProposals = false,
                 ShowAs = showAsStatus,
@@ -154,6 +124,7 @@ public class BookingsController : ControllerBase
                 ReminderMinutesBeforeStart = reminderMinutesBeforeStart
             };
 
+            // ✅ Save event in user's calendar
             var createdEvent = await _graphClient.Users[userEmail]
                 .Calendar
                 .Events
@@ -171,7 +142,6 @@ public class BookingsController : ControllerBase
                 isReminderOn = createdEvent.IsReminderOn,
                 reminderMinutesBeforeStart = createdEvent.ReminderMinutesBeforeStart
             });
-
         }
         catch (ODataError ex)
         {
