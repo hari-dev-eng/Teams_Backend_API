@@ -50,50 +50,42 @@ public class BookingsController : ControllerBase
                 return BadRequest(new { error = "UserEmail and RoomEmail are required" });
             }
             if (dto == null) return BadRequest("Request body is null || No data sent to API");
-            // Build attendees list dynamically
+
+            // Build attendees list dynamically (only people, no room)
             var attendees = new List<Attendee>
-            {
-                // Room attendee
-                new Attendee
-                {
-                    EmailAddress = new EmailAddress
-                    {
-                        Address = roomEmail,
-                        Name = dto.Location
-                    },
-                    Type = AttendeeType.Required
-                },
-                // Organizer attendee
-                new Attendee
-                {
-                    EmailAddress = new EmailAddress
-                    {
-                        Address = userEmail,
-                        Name = userName
-                    },
-                    Type = AttendeeType.Required
-                }
-            };
+{
+    // Organizer attendee
+    new Attendee
+    {
+        EmailAddress = new EmailAddress
+        {
+            Address = userEmail,
+            Name = userName
+        },
+        Type = AttendeeType.Required
+    }
+};
 
             // Add extra attendees if provided
             if (dto.Attendees != null && dto.Attendees.Any())
             {
                 foreach (var att in dto.Attendees)
                 {
-                    if (!string.IsNullOrEmpty(att.Email)) // Fixed: Use att.Email
+                    if (!string.IsNullOrEmpty(att.Email))
                     {
                         attendees.Add(new Attendee
                         {
                             EmailAddress = new EmailAddress
                             {
-                                Address = att.Email, // Fixed: Use att.Email
-                                Name = string.IsNullOrEmpty(att.Name) ? att.Email.Split('@')[0] : att.Name 
+                                Address = att.Email,
+                                Name = string.IsNullOrEmpty(att.Name) ? att.Email.Split('@')[0] : att.Name
                             },
                             Type = AttendeeType.Required
                         });
                     }
                 }
             }
+
 
             //response options update - Use dto.Category (capital C)
             if (!Enum.TryParse<FreeBusyStatus>(dto.Category, out var showAsStatus))
@@ -176,7 +168,7 @@ public class BookingsController : ControllerBase
 
     [HttpGet("GetAccessToken")]
     [AllowAnonymous]
-     public async Task<IActionResult> GetAccessToken()
+    public async Task<IActionResult> GetAccessToken()
     {
         var clientId = _config["AzureAd:ClientId"];
         var tenantId = _config["AzureAd:TenantId"];
