@@ -41,30 +41,28 @@ public class BookingsController : ControllerBase
     {
         try
         {
+            if (dto == null) return BadRequest("Request body is null || No data sent to API");
+            if (string.IsNullOrEmpty(dto.UserEmail) || string.IsNullOrEmpty(dto.RoomEmail))
+                return BadRequest(new { error = "UserEmail and RoomEmail are required" });
+
             var userEmail = dto.UserEmail;
             var roomEmail = dto.RoomEmail;
             var userName = userEmail.Split('@')[0];
 
-            if (string.IsNullOrEmpty(userEmail) || string.IsNullOrEmpty(roomEmail))
-            {
-                return BadRequest(new { error = "UserEmail and RoomEmail are required" });
-            }
-            if (dto == null) return BadRequest("Request body is null || No data sent to API");
-
-            // Build attendees list dynamically (only people, no room)
+            // Build attendees list dynamically (only users, no room)
             var attendees = new List<Attendee>
-{
-    // Organizer attendee
-    new Attendee
-    {
-        EmailAddress = new EmailAddress
         {
-            Address = userEmail,
-            Name = userName
-        },
-        Type = AttendeeType.Required
-    }
-};
+            // Organizer attendee
+            new Attendee
+            {
+                EmailAddress = new EmailAddress
+                {
+                    Address = userEmail,
+                    Name = userName
+                },
+                Type = AttendeeType.Required
+            }
+        };
 
             // Add extra attendees if provided
             if (dto.Attendees != null && dto.Attendees.Any())
@@ -86,19 +84,13 @@ public class BookingsController : ControllerBase
                 }
             }
 
-
-            //response options update - Use dto.Category (capital C)
+            // Parse category / showAs
             if (!Enum.TryParse<FreeBusyStatus>(dto.Category, out var showAsStatus))
             {
-                // If parsing fails, default to 'Busy'
                 showAsStatus = FreeBusyStatus.Oof;
             }
 
-            // --- NEW: Handle the Reminder option directly ---
-            // Use dto.Reminder (capital R)
             int reminderMinutesBeforeStart = dto.Reminder;
-
-            // The IsReminderOn property should be true only if the reminder value is greater than zero.
             bool isReminderOn = dto.Reminder > 0;
 
             // Create event
@@ -123,18 +115,16 @@ public class BookingsController : ControllerBase
                 Location = new Location
                 {
                     DisplayName = dto.Location,
-                    LocationEmailAddress = roomEmail
+                    LocationEmailAddress = roomEmail // room only here
                 },
                 Attendees = attendees,
                 IsOnlineMeeting = false,
                 AllowNewTimeProposals = false,
-
                 ShowAs = showAsStatus,
                 IsReminderOn = isReminderOn,
                 ReminderMinutesBeforeStart = reminderMinutesBeforeStart
             };
 
-            // Create the event in the user's calendar
             var createdEvent = await _graphClient.Users[userEmail]
                 .Calendar
                 .Events
@@ -166,9 +156,10 @@ public class BookingsController : ControllerBase
         }
     }
 
+
     [HttpGet("GetAccessToken")]
     [AllowAnonymous]
-    public async Task<IActionResult> GetAccessToken()
+     public async Task<IActionResult> GetAccessToken()
     {
         var clientId = _config["AzureAd:ClientId"];
         var tenantId = _config["AzureAd:TenantId"];
