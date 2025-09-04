@@ -119,7 +119,6 @@ public class BookingsController : ControllerBase
                 },
                 Location = new Location
                 {
-                    DisplayName = dto.Location,
                     LocationEmailAddress = roomEmail
                 },
                 Attendees = attendees,
