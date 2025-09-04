@@ -81,8 +81,12 @@ public class BookingsController : ControllerBase
             int reminderMinutesBeforeStart = dto.Reminder;
             bool isReminderOn = dto.Reminder > 0;
 
-            // --- Store in IST instead of UTC ---
             const string OutlookTz = "India Standard Time";
+
+            // Convert input time (assume dto.StartTime and dto.EndTime are UTC)
+            var istZone = TimeZoneInfo.FindSystemTimeZoneById("India Standard Time");
+            var startIst = TimeZoneInfo.ConvertTimeFromUtc(dto.StartTime, istZone);
+            var endIst = TimeZoneInfo.ConvertTimeFromUtc(dto.EndTime, istZone);
 
             var @event = new Event
             {
@@ -94,21 +98,19 @@ public class BookingsController : ControllerBase
                 },
                 Start = new DateTimeTimeZone
                 {
-                    DateTime = dto.StartTime.ToString("yyyy-MM-ddTHH:mm:ss"),
+                    DateTime = startIst.ToString("yyyy-MM-ddTHH:mm:ss"),
                     TimeZone = OutlookTz
                 },
                 End = new DateTimeTimeZone
                 {
-                    DateTime = dto.EndTime.ToString("yyyy-MM-ddTHH:mm:ss"),
+                    DateTime = endIst.ToString("yyyy-MM-ddTHH:mm:ss"),
                     TimeZone = OutlookTz
                 },
-                // ✅ Correct location assignment
                 Location = new Location
                 {
                     DisplayName = dto.RoomName,
                     LocationEmailAddress = roomEmail
                 },
-                // ✅ Attendees only = people invited (NOT organizer, NOT room)
                 Attendees = attendees,
                 IsOnlineMeeting = false,
                 AllowNewTimeProposals = false,
