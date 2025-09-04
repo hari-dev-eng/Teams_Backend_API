@@ -49,7 +49,7 @@ public class BookingsController : ControllerBase
             var roomEmail = dto.RoomEmail;
             var userName = userEmail.Split('@')[0];
 
-            // Build attendees list dynamically (only users, no room)
+            // Build attendees list
             var attendees = new List<Attendee>
         {
             // Organizer attendee
@@ -61,6 +61,16 @@ public class BookingsController : ControllerBase
                     Name = userName
                 },
                 Type = AttendeeType.Required
+            },
+            // Room as resource attendee (FIXED)
+            new Attendee
+            {
+                EmailAddress = new EmailAddress
+                {
+                    Address = roomEmail,
+                    Name = dto.RoomName ?? roomEmail.Split('@')[0]
+                },
+                Type = AttendeeType.Resource // This is key for room recognition
             }
         };
 
@@ -115,7 +125,7 @@ public class BookingsController : ControllerBase
                 Location = new Location
                 {
                     DisplayName = dto.Location,
-                    LocationEmailAddress = roomEmail // room only here
+                    LocationEmailAddress = roomEmail // Keep this as well
                 },
                 Attendees = attendees,
                 IsOnlineMeeting = false,
@@ -137,7 +147,6 @@ public class BookingsController : ControllerBase
                 start = createdEvent.Start,
                 end = createdEvent.End,
                 location = createdEvent.Location?.DisplayName,
-                locationEmail = createdEvent.Location?.LocationEmailAddress,
                 onlineMeetingUrl = createdEvent.OnlineMeeting?.JoinUrl,
                 showAs = createdEvent.ShowAs,
                 isReminderOn = createdEvent.IsReminderOn,
@@ -159,7 +168,7 @@ public class BookingsController : ControllerBase
 
     [HttpGet("GetAccessToken")]
     [AllowAnonymous]
-     public async Task<IActionResult> GetAccessToken()
+    public async Task<IActionResult> GetAccessToken()
     {
         var clientId = _config["AzureAd:ClientId"];
         var tenantId = _config["AzureAd:TenantId"];
@@ -176,30 +185,4 @@ public class BookingsController : ControllerBase
         return Ok(new { access_token = token.AccessToken });
     }
 
-    [HttpGet("rooms")]
-    [AllowAnonymous]
-    public async Task<IActionResult> GetAvailableRooms()
-    {
-        try
-        {
-            var rooms = await _graphClient.Users
-                .GetAsync(requestConfiguration =>
-                {
-                    requestConfiguration.QueryParameters.Filter = "userType eq 'Room'";
-                    requestConfiguration.QueryParameters.Select = new[] { "id", "displayName", "mail", "officeLocation" };
-                });
-
-            return Ok(rooms?.Value?.Select(r => new
-            {
-                id = r.Id,
-                displayName = r.DisplayName,
-                email = r.Mail,
-                officeLocation = r.OfficeLocation
-            }));
-        }
-        catch (ODataError ex)
-        {
-            return BadRequest(new { error = ex.Error?.Message });
-        }
-    }
 }

@@ -17,6 +17,7 @@ namespace Teams_Backend_API.Models.DTOs
 
         [JsonPropertyName("category")]
         public string ?Category { get; set; }
+        public string ?RoomName { get; set; }
 
         [JsonPropertyName("reminder")]
         public int Reminder { get; set; }
