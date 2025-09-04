@@ -21,6 +21,7 @@ namespace Teams_Backend_API.Models.DTOs
 
         [JsonPropertyName("reminder")]
         public int Reminder { get; set; }
+        public string? OrganizerName { get; internal set; }
     }
 
    

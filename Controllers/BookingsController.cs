@@ -16,6 +16,9 @@ public class BookingsController : ControllerBase
 {
     private readonly GraphServiceClient _graphClient;
     private readonly IConfiguration _config;
+    private FreeBusyStatus? showAsStatus;
+    private bool? isReminderOn;
+    private int? reminderMinutesBeforeStart;
 
     public BookingsController(IConfiguration config)
     {
@@ -52,6 +55,29 @@ public class BookingsController : ControllerBase
             // Collect attendees (excluding organizer & room)
             var attendees = new List<Attendee>();
 
+            // Organizer
+            attendees.Add(new Attendee
+            {
+                EmailAddress = new EmailAddress
+                {
+                    Address = userEmail,
+                    Name = string.IsNullOrEmpty(dto.OrganizerName) ? userEmail.Split('@')[0] : dto.OrganizerName
+                },
+                Type = AttendeeType.Required
+            });
+
+            // Room as resource attendee
+            attendees.Add(new Attendee
+            {
+                EmailAddress = new EmailAddress
+                {
+                    Address = roomEmail,
+                    Name = dto.RoomName
+                },
+                Type = AttendeeType.Resource
+            });
+
+            // Extra attendees
             if (dto.Attendees != null && dto.Attendees.Any())
             {
                 foreach (var att in dto.Attendees)
@@ -70,16 +96,6 @@ public class BookingsController : ControllerBase
                     }
                 }
             }
-
-            // FreeBusy status
-            if (!Enum.TryParse<FreeBusyStatus>(dto.Category, out var showAsStatus))
-            {
-                showAsStatus = FreeBusyStatus.Busy;
-            }
-
-            // Reminder
-            int reminderMinutesBeforeStart = dto.Reminder;
-            bool isReminderOn = dto.Reminder > 0;
 
             const string OutlookTz = "India Standard Time";
 
@@ -106,6 +122,7 @@ public class BookingsController : ControllerBase
                     DateTime = endIst.ToString("yyyy-MM-ddTHH:mm:ss"),
                     TimeZone = OutlookTz
                 },
+                // ✅ Location field for room
                 Location = new Location
                 {
                     DisplayName = dto.RoomName,
