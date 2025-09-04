@@ -80,14 +80,14 @@ public class BookingsController : ControllerBase
             {
                 foreach (var att in dto.Attendees)
                 {
-                    if (!string.IsNullOrEmpty(att.Email))
+                    if (!string.IsNullOrEmpty(att.Email)) // Fixed: Use att.Email
                     {
                         attendees.Add(new Attendee
                         {
                             EmailAddress = new EmailAddress
                             {
-                                Address = att.Email,
-                                Name = string.IsNullOrEmpty(att.Name) ? att.Email.Split('@')[0] : att.Name
+                                Address = att.Email, // Fixed: Use att.Email
+                                Name = string.IsNullOrEmpty(att.Name) ? att.Email.Split('@')[0] : att.Name 
                             },
                             Type = AttendeeType.Required
                         });
@@ -95,19 +95,19 @@ public class BookingsController : ControllerBase
                 }
             }
 
-            //response options update
-            if (!Enum.TryParse<FreeBusyStatus>(dto.category, out var showAsStatus))
+            //response options update - Use dto.Category (capital C)
+            if (!Enum.TryParse<FreeBusyStatus>(dto.Category, out var showAsStatus))
             {
                 // If parsing fails, default to 'Busy'
                 showAsStatus = FreeBusyStatus.Oof;
             }
 
             // --- NEW: Handle the Reminder option directly ---
-            // Assuming dto.Reminder is now an integer from the frontend (0 for None, >0 otherwise)
-            int reminderMinutesBeforeStart = dto.reminder;
+            // Use dto.Reminder (capital R)
+            int reminderMinutesBeforeStart = dto.Reminder;
 
             // The IsReminderOn property should be true only if the reminder value is greater than zero.
-            bool isReminderOn = dto.reminder > 0;
+            bool isReminderOn = dto.Reminder > 0;
 
             // Create event
             var @event = new Event
