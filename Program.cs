@@ -45,12 +45,8 @@ builder.Services.AddHttpClient();
 
 var app = builder.Build();
 
-// This block is for development only and should not be in production.
-// if (app.Environment.IsDevelopment())
-// {
-//     app.UseSwagger();
-//     app.UseSwaggerUI();
-// }
+
+
 
 var fwd = new ForwardedHeadersOptions
 {
