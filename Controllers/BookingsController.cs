@@ -41,8 +41,6 @@ public class BookingsController : ControllerBase
     {
         try
         {
-            if (dto == null) return BadRequest("Request body is null || No data sent to API");
-
             var userEmail = dto.UserEmail;
             var roomEmail = dto.RoomEmail;
             var userName = userEmail.Split('@')[0];
@@ -51,22 +49,33 @@ public class BookingsController : ControllerBase
             {
                 return BadRequest(new { error = "UserEmail and RoomEmail are required" });
             }
-
-            // Attendees
+            if (dto == null) return BadRequest("Request body is null || No data sent to API");
+            // Build attendees list dynamically
             var attendees = new List<Attendee>
-        {
-            // Organizer
-            new Attendee
             {
-                EmailAddress = new EmailAddress
+                // Room attendee
+                new Attendee
                 {
-                    Address = userEmail,
-                    Name = userName
+                    EmailAddress = new EmailAddress
+                    {
+                        Address = roomEmail,
+                        Name = dto.Location
+                    },
+                    Type = AttendeeType.Required
                 },
-                Type = AttendeeType.Required
-            }
-        };
+                // Organizer attendee
+                new Attendee
+                {
+                    EmailAddress = new EmailAddress
+                    {
+                        Address = userEmail,
+                        Name = userName
+                    },
+                    Type = AttendeeType.Required
+                }
+            };
 
+            // Add extra attendees if provided
             if (dto.Attendees != null && dto.Attendees.Any())
             {
                 foreach (var att in dto.Attendees)
@@ -86,19 +95,21 @@ public class BookingsController : ControllerBase
                 }
             }
 
-            // FreeBusy status
+            //response options update
             if (!Enum.TryParse<FreeBusyStatus>(dto.Category, out var showAsStatus))
             {
-                showAsStatus = FreeBusyStatus.Busy;
+                // If parsing fails, default to 'Busy'
+                showAsStatus = FreeBusyStatus.Oof;
             }
 
-            // Reminder
+            // --- NEW: Handle the Reminder option directly ---
+            // Assuming dto.Reminder is now an integer from the frontend (0 for None, >0 otherwise)
             int reminderMinutesBeforeStart = dto.Reminder;
+
+            // The IsReminderOn property should be true only if the reminder value is greater than zero.
             bool isReminderOn = dto.Reminder > 0;
 
-            // --- Store in IST instead of UTC ---
-            const string OutlookTz = "India Standard Time";
-
+            // Create event
             var @event = new Event
             {
                 Subject = dto.Title,
@@ -110,12 +121,12 @@ public class BookingsController : ControllerBase
                 Start = new DateTimeTimeZone
                 {
                     DateTime = dto.StartTime.ToString("yyyy-MM-ddTHH:mm:ss"),
-                    TimeZone = OutlookTz
+                    TimeZone = "UTC"
                 },
                 End = new DateTimeTimeZone
                 {
                     DateTime = dto.EndTime.ToString("yyyy-MM-ddTHH:mm:ss"),
-                    TimeZone = OutlookTz
+                    TimeZone = "UTC"
                 },
                 Location = new Location
                 {
@@ -134,8 +145,8 @@ public class BookingsController : ControllerBase
             Type = AttendeeType.Resource
         }
     }
-    .Concat(attendees) // add user + extra attendees
-    .ToList(),
+     .Concat(attendees) // add user + extra attendees
+     .ToList(),
                 IsOnlineMeeting = false,
                 AllowNewTimeProposals = false,
                 ShowAs = showAsStatus,
@@ -160,6 +171,7 @@ public class BookingsController : ControllerBase
                 isReminderOn = createdEvent.IsReminderOn,
                 reminderMinutesBeforeStart = createdEvent.ReminderMinutesBeforeStart
             });
+
         }
         catch (ODataError ex)
         {
@@ -190,5 +202,30 @@ public class BookingsController : ControllerBase
         return Ok(new { access_token = token.AccessToken });
     }
 
+    [HttpGet("rooms")]
+    [AllowAnonymous]
+    public async Task<IActionResult> GetAvailableRooms()
+    {
+        try
+        {
+            var rooms = await _graphClient.Users
+                .GetAsync(requestConfiguration =>
+                {
+                    requestConfiguration.QueryParameters.Filter = "userType eq 'Room'";
+                    requestConfiguration.QueryParameters.Select = new[] { "id", "displayName", "mail", "officeLocation" };
+                });
 
+            return Ok(rooms?.Value?.Select(r => new
+            {
+                id = r.Id,
+                displayName = r.DisplayName,
+                email = r.Mail,
+                officeLocation = r.OfficeLocation
+            }));
+        }
+        catch (ODataError ex)
+        {
+            return BadRequest(new { error = ex.Error?.Message });
+        }
+    }
 }
