@@ -175,7 +175,8 @@ public class BookingsController : ControllerBase
     }
 
     [HttpGet("GetAccessToken")]
-    public async Task<IActionResult> GetAccessToken()
+    [AllowAnonymous]
+     public async Task<IActionResult> GetAccessToken()
     {
         var clientId = _config["AzureAd:ClientId"];
         var tenantId = _config["AzureAd:TenantId"];

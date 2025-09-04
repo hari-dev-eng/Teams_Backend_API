@@ -10,13 +10,12 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     .AddMicrosoftIdentityWebApi(options =>
     {
-        builder.Configuration.Bind("AzureAd", options);   // config from appsettings.json
+        builder.Configuration.Bind("AzureAd", options);    // config from appsettings.json
     },
     options =>
     {
         builder.Configuration.Bind("AzureAd", options);
     });
-
 
 builder.Services.AddAuthorization();
 
@@ -33,8 +32,8 @@ builder.Services.AddCors(options =>
             if (string.IsNullOrEmpty(origin)) return false;
             var host = new Uri(origin).Host;
             return host.Equals("teams-meeting-web.vercel.app", StringComparison.OrdinalIgnoreCase)
-                   || host.EndsWith(".vercel.app", StringComparison.OrdinalIgnoreCase)  // previews
-                   || host.StartsWith("localhost");
+                       || host.EndsWith(".vercel.app", StringComparison.OrdinalIgnoreCase)
+                       || host.StartsWith("localhost");
         })
         .AllowAnyHeader()
         .AllowAnyMethod()
@@ -46,11 +45,12 @@ builder.Services.AddHttpClient();
 
 var app = builder.Build();
 
-if (app.Environment.IsDevelopment())
-{
-    app.UseSwagger();
-    app.UseSwaggerUI();
-}
+// This block is for development only and should not be in production.
+// if (app.Environment.IsDevelopment())
+// {
+//     app.UseSwagger();
+//     app.UseSwaggerUI();
+// }
 
 var fwd = new ForwardedHeadersOptions
 {

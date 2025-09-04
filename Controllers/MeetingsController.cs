@@ -4,19 +4,10 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.Identity.Client;
 using Newtonsoft.Json.Linq;
 using System.Collections.Concurrent;
+using Teams_Backend_API.Models.Entities;
 
 namespace OutLook_Events
 {
-    public class MeetingViewModel
-    {
-        public string? Subject { get; set; }
-        public string? StartTime { get; set; }   // "yyyy-MM-ddTHH:mm:ss" (IST)
-        public string? EndTime { get; set; }     // "yyyy-MM-ddTHH:mm:ss" (IST)
-        public string? Organizer { get; set; }
-        public string? OrganizerEmail { get; set; }
-        public string? Location { get; set; }
-        public int AttendeeCount { get; set; }
-    }
 
     [Route("api/[controller]")]
     [ApiController]
