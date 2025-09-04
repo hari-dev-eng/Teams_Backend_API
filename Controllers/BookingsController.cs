@@ -119,9 +119,23 @@ public class BookingsController : ControllerBase
                 },
                 Location = new Location
                 {
+                    DisplayName = dto.RoomName,
                     LocationEmailAddress = roomEmail
                 },
-                Attendees = attendees,
+                Attendees = new List<Attendee>
+    {
+        new Attendee
+        {
+            EmailAddress = new EmailAddress
+            {
+                Address = roomEmail,
+                Name = dto.RoomName
+            },
+            Type = AttendeeType.Resource
+        }
+    }
+    .Concat(attendees) // add user + extra attendees
+    .ToList(),
                 IsOnlineMeeting = false,
                 AllowNewTimeProposals = false,
                 ShowAs = showAsStatus,
@@ -129,8 +143,7 @@ public class BookingsController : ControllerBase
                 ReminderMinutesBeforeStart = reminderMinutesBeforeStart
             };
 
-            // 🚨 IMPORTANT: Save to the room’s calendar, not the user’s
-            var createdEvent = await _graphClient.Users[roomEmail]
+            var createdEvent = await _graphClient.Users[userEmail]
                 .Calendar
                 .Events
                 .PostAsync(@event);
@@ -177,5 +190,5 @@ public class BookingsController : ControllerBase
         return Ok(new { access_token = token.AccessToken });
     }
 
-  
+
 }
