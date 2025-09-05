@@ -157,18 +157,14 @@ public class BookingsController : ControllerBase
                 IsAllDay = dto.IsAllDay
             };
 
-            // Handle recurrence if specified
-
+            // Recurrence
             if (dto.IsRecurring && dto.RecurrencePattern != null)
-
             {
-
                 @event.Recurrence = CreateRecurrencePattern(dto.RecurrencePattern, dto.StartTime);
-
             }
 
-            // Organizer = userEmail
-            var createdEvent = await _graphClient.Users[userEmail]
+            // Create event
+            var createdEvent = await _graphClient.Users[dto.UserEmail]
                 .Calendar
                 .Events
                 .PostAsync(@event);
