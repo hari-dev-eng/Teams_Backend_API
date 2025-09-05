@@ -34,7 +34,9 @@ public class BookingsController : ControllerBase
         );
         _graphClient = new GraphServiceClient(clientSecretCredential);
     }
-    [HttpPost]
+
+
+    [HttpPost("api/Bookings")]
     //[Authorize]
     public async Task<IActionResult> Create([FromBody] BookingDto dto)
     {
