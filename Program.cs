@@ -73,14 +73,10 @@ builder.Services.AddCors(options =>
 {
     options.AddPolicy("AllowProduction", policy =>
     {
-        policy.WithOrigins(
-                "https://teams-meeting-web.vercel.app",
-                "https://*.vercel.app"
-            )
-            .AllowAnyHeader()
-            .AllowAnyMethod()
-            .AllowCredentials()
-            .SetPreflightMaxAge(TimeSpan.FromHours(1));
+        policy.WithOrigins("https://teams-meeting-web.vercel.app")
+              .AllowAnyHeader()
+              .AllowAnyMethod()
+              .AllowCredentials();
     });
 
     // Add a more restrictive policy for production
