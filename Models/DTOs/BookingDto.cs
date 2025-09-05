@@ -22,7 +22,25 @@ namespace Teams_Backend_API.Models.DTOs
         [JsonPropertyName("reminder")]
         public int Reminder { get; set; }
         public string? OrganizerName { get; internal set; }
+
+        public bool IsAllDay { get; set; }
+        public bool IsRecurring { get; set; }
+        public RecurrencePatternDto ?RecurrencePattern { get; set; }
+    }
+    public class RecurrencePatternDto
+    {
+        public string ?PatternType { get; set; }
+        public int? Interval { get; set; }
+        public int? DayOfMonth { get; set; }
+        public int? Month { get; set; }
+        public int DaysOfWeek { get; set; } // bitmask
+        public RecurrenceRangeDto ?Range { get; set; }
     }
 
-   
+    public class RecurrenceRangeDto
+    {
+        public string ?Type { get; set; }
+        public DateTime? EndDate { get; set; }
+        public int? NumberOfOccurrences { get; set; }
+    }
 }
