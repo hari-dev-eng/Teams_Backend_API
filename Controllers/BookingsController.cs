@@ -36,7 +36,6 @@ public class BookingsController : ControllerBase
     }
     [HttpPost]
     //[Authorize]
-    [Route("api/bookings")]
     public async Task<IActionResult> Create([FromBody] BookingDto dto)
     {
         try
