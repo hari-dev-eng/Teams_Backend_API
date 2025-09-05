@@ -7,6 +7,7 @@ using Microsoft.Graph.Models;
 using Microsoft.Graph.Models.ODataErrors;
 using Microsoft.Identity.Client;
 using Azure.Core;
+using Microsoft.Kiota.Abstractions;
 
 namespace Teams_Backend_API.Controllers;
 
@@ -16,6 +17,8 @@ public class BookingsController : ControllerBase
 {
     private readonly GraphServiceClient _graphClient;
     private readonly IConfiguration _config;
+
+    // you had these fields already; we will set them from the DTO before building the event
     private FreeBusyStatus? showAsStatus;
     private bool? isReminderOn;
     private int? reminderMinutesBeforeStart;
@@ -35,6 +38,101 @@ public class BookingsController : ControllerBase
 
         _graphClient = new GraphServiceClient(clientSecretCredential);
     }
+
+    // ===========================
+    // ADDED: helpers (private)
+    // ===========================
+
+    // Map "Busy"/"Free"/"Tentative" -> Graph status
+    private static FreeBusyStatus MapShowAs(string? category) =>
+     (category ?? "Busy").ToLowerInvariant() switch
+     {
+         "free" => FreeBusyStatus.Free,
+         "tentative" => FreeBusyStatus.Tentative,
+         _ => FreeBusyStatus.Busy
+     };
+
+    // Bitmask -> Graph DayOfWeek list
+    // Bit positions: 0=Sunday,1=Monday,...,6=Saturday (matches Teams UX)
+    private static List<DayOfWeekObject?> DaysOfWeekFromMask(int mask)
+    {
+        var list = new List<DayOfWeekObject?>();
+        if ((mask & (1 << 0)) != 0) list.Add(DayOfWeekObject.Sunday);
+        if ((mask & (1 << 1)) != 0) list.Add(DayOfWeekObject.Monday);
+        if ((mask & (1 << 2)) != 0) list.Add(DayOfWeekObject.Tuesday);
+        if ((mask & (1 << 3)) != 0) list.Add(DayOfWeekObject.Wednesday);
+        if ((mask & (1 << 4)) != 0) list.Add(DayOfWeekObject.Thursday);
+        if ((mask & (1 << 5)) != 0) list.Add(DayOfWeekObject.Friday);
+        if ((mask & (1 << 6)) != 0) list.Add(DayOfWeekObject.Saturday);
+        return list;
+    }
+
+
+    // Your DTO -> Graph PatternedRecurrence
+    private static PatternedRecurrence? BuildGraphRecurrence(RecurrencePatternDto? src, DateOnly seriesStartLocal)
+    {
+        if (src == null) return null;
+
+        var pattern = new RecurrencePattern
+        {
+            Interval = Math.Max(1, src.Interval ?? 1)
+        };
+
+        switch ((src.PatternType ?? "").ToLowerInvariant())
+        {
+            case "daily":
+                pattern.Type = RecurrencePatternType.Daily;
+                break;
+
+            case "weekly":
+                pattern.Type = RecurrencePatternType.Weekly;
+                pattern.DaysOfWeek = DaysOfWeekFromMask(src.DaysOfWeek);
+                break;
+
+            case "monthly": // absolute day-of-month
+                pattern.Type = RecurrencePatternType.AbsoluteMonthly;
+                pattern.DayOfMonth = src.DayOfMonth ?? seriesStartLocal.Day;
+                break;
+
+            case "yearly": // absolute month/day
+                pattern.Type = RecurrencePatternType.AbsoluteYearly;
+                pattern.Month = src.Month ?? seriesStartLocal.Month; // 1..12
+                pattern.DayOfMonth = src.DayOfMonth ?? seriesStartLocal.Day;
+                break;
+
+            default:
+                return null;
+        }
+
+        var range = new RecurrenceRange
+        {
+            // Microsoft.Graph Date(year, month, day)
+            StartDate = new Date(seriesStartLocal.Year, seriesStartLocal.Month, seriesStartLocal.Day)
+        };
+
+        var rangeType = (src.Range?.Type ?? "noEnd").ToLowerInvariant();
+        if (rangeType is "enddate" or "date")
+        {
+            range.Type = RecurrenceRangeType.EndDate;
+            if (src.Range!.EndDate.HasValue)
+            {
+                var ed = src.Range.EndDate.Value;
+                range.EndDate = new Date(ed.Year, ed.Month, ed.Day);
+            }
+        }
+        else if (rangeType is "numbered" or "after")
+        {
+            range.Type = RecurrenceRangeType.Numbered;
+            range.NumberOfOccurrences = Math.Max(1, src.Range!.NumberOfOccurrences ?? 1);
+        }
+        else
+        {
+            range.Type = RecurrenceRangeType.NoEnd;
+        }
+
+        return new PatternedRecurrence { Pattern = pattern, Range = range };
+    }
+    // ===========================
 
     [HttpPost]
     //[Authorize]
@@ -100,9 +198,27 @@ public class BookingsController : ControllerBase
             const string OutlookTz = "India Standard Time";
 
             // Convert input time (assume dto.StartTime and dto.EndTime are UTC)
-            var istZone = TimeZoneInfo.FindSystemTimeZoneById("India Standard Time");
+            var istZone = TimeZoneInfo.FindSystemTimeZoneById(OutlookTz);
             var startIst = TimeZoneInfo.ConvertTimeFromUtc(dto.StartTime, istZone);
             var endIst = TimeZoneInfo.ConvertTimeFromUtc(dto.EndTime, istZone);
+
+            // ===========================
+            // ADDED: category & reminder mapping
+            // ===========================
+            showAsStatus = MapShowAs(dto.Category);
+            isReminderOn = dto.Reminder > 0;
+            reminderMinutesBeforeStart = dto.Reminder > 0 ? dto.Reminder : 0;
+
+            // ===========================
+            // ADDED: recurrence (only if requested)
+            // ===========================
+            PatternedRecurrence? recurrence = null;
+            if (dto.IsRecurring && dto.RecurrencePattern != null)
+            {
+                // Graph wants the local calendar date of the first occurrence
+                var startDateLocal = DateOnly.FromDateTime(startIst.Date);
+                recurrence = BuildGraphRecurrence(dto.RecurrencePattern, startDateLocal);
+            }
 
             var @event = new Event
             {
@@ -122,7 +238,6 @@ public class BookingsController : ControllerBase
                     DateTime = endIst.ToString("yyyy-MM-ddTHH:mm:ss"),
                     TimeZone = OutlookTz
                 },
-                // ✅ Location field for room
                 Location = new Location
                 {
                     DisplayName = dto.RoomName,
@@ -131,9 +246,17 @@ public class BookingsController : ControllerBase
                 Attendees = attendees,
                 IsOnlineMeeting = false,
                 AllowNewTimeProposals = false,
+
+                // use fields we set above to avoid touching your existing property names
                 ShowAs = showAsStatus,
                 IsReminderOn = isReminderOn,
-                ReminderMinutesBeforeStart = reminderMinutesBeforeStart
+                ReminderMinutesBeforeStart = reminderMinutesBeforeStart,
+
+                // ADDED: recurrence
+                Recurrence = recurrence,
+
+                // (optional but harmless if you already normalize times for all-day on FE)
+                IsAllDay = dto.IsAllDay
             };
 
             // Organizer = userEmail
@@ -152,7 +275,8 @@ public class BookingsController : ControllerBase
                 locationEmail = createdEvent.Location?.LocationEmailAddress,
                 showAs = createdEvent.ShowAs,
                 isReminderOn = createdEvent.IsReminderOn,
-                reminderMinutesBeforeStart = createdEvent.ReminderMinutesBeforeStart
+                reminderMinutesBeforeStart = createdEvent.ReminderMinutesBeforeStart,
+                recurrence = createdEvent.Recurrence // echo back for debugging
             });
         }
         catch (ODataError ex)
