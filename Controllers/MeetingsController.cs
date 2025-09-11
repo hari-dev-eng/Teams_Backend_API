@@ -183,7 +183,7 @@ namespace OutLook_Events
                             var organizerEmail = ev.SelectToken("organizer.emailAddress.address")?.ToString();
 
                             var eventId = ev.SelectToken("id")?.ToString();   // <-- add this
-                            
+
                             allMeetings.Add(new MeetingViewModel
                             {
                                 Id = eventId,
@@ -222,67 +222,49 @@ namespace OutLook_Events
                 return StatusCode(500, new { status = "failure", message = "Internal server error", details = ex.Message });
             }
         }
-        // Delete meeting
         [HttpDelete("{eventId}")]
-        public async Task<IActionResult> DeleteMeeting(
-            string eventId,
-            [FromQuery] string organizerEmail)  // pass the real organizer email, not room
+        public async Task<IActionResult> DeleteMeeting(string eventId, [FromQuery] string calendarEmail)
         {
-            if (string.IsNullOrWhiteSpace(eventId) || string.IsNullOrWhiteSpace(organizerEmail))
+            if (string.IsNullOrWhiteSpace(eventId) || string.IsNullOrWhiteSpace(calendarEmail))
+                return BadRequest(new { status = "failure", message = "eventId and calendarEmail are required." });
+
+            var clientId = _config["AzureAd:ClientId"];
+            var clientSecret = _config["AzureAd:ClientSecret"];
+            var tenantId = _config["AzureAd:TenantId"];
+            var scopes = new[] { "https://graph.microsoft.com/.default" };
+
+            IConfidentialClientApplication app = ConfidentialClientApplicationBuilder
+                .Create(clientId)
+                .WithClientSecret(clientSecret)
+                .WithAuthority($"https://login.microsoftonline.com/{tenantId}")
+                .Build();
+
+            var token = await app.AcquireTokenForClient(scopes).ExecuteAsync();
+
+            using var httpClient = _httpClientFactory.CreateClient();
+            httpClient.DefaultRequestHeaders.Authorization =
+                new AuthenticationHeaderValue("Bearer", token.AccessToken);
+
+            var endpoint =
+                $"https://graph.microsoft.com/v1.0/users/{Uri.EscapeDataString(calendarEmail)}/events/{Uri.EscapeDataString(eventId)}";
+
+            var response = await httpClient.DeleteAsync(endpoint);
+
+            if (!response.IsSuccessStatusCode)
             {
-                return BadRequest(new { status = "failure", message = "eventId and organizerEmail are required." });
-            }
+                var errorBody = await response.Content.ReadAsStringAsync();
+                _logger.LogWarning("Failed to delete event {EventId} from {Calendar}: {Status} {Body}",
+                    eventId, calendarEmail, response.StatusCode, errorBody);
 
-            try
-            {
-                var clientId = _config["AzureAd:ClientId"];
-                var clientSecret = _config["AzureAd:ClientSecret"];
-                var tenantId = _config["AzureAd:TenantId"];
-                var scopes = new[] { "https://graph.microsoft.com/.default" };
-
-                IConfidentialClientApplication app = ConfidentialClientApplicationBuilder
-                    .Create(clientId)
-                    .WithClientSecret(clientSecret)
-                    .WithAuthority($"https://login.microsoftonline.com/{tenantId}")
-                    .Build();
-
-                var token = await app.AcquireTokenForClient(scopes).ExecuteAsync();
-
-                using var httpClient = _httpClientFactory.CreateClient();
-                httpClient.DefaultRequestHeaders.Authorization =
-                    new AuthenticationHeaderValue("Bearer", token.AccessToken);
-
-                // Delete from the organizer’s mailbox so Teams reflects it
-                var endpoint = $"https://graph.microsoft.com/v1.0/users/{Uri.EscapeDataString(organizerEmail)}/events/{Uri.EscapeDataString(eventId)}";
-
-                var response = await httpClient.DeleteAsync(endpoint);
-
-                if (!response.IsSuccessStatusCode)
-                {
-                    var errorBody = await response.Content.ReadAsStringAsync();
-                    _logger.LogWarning("Failed to delete event {EventId} from {Organizer}: {Status} {Body}",
-                        eventId, organizerEmail, response.StatusCode, errorBody);
-
-                    return StatusCode((int)response.StatusCode, new
-                    {
-                        status = "failure",
-                        message = "Graph deletion failed",
-                        details = errorBody
-                    });
-                }
-
-                return Ok(new { status = "success", message = "Meeting cancelled successfully." });
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error deleting meeting {EventId} from {Organizer}", eventId, organizerEmail);
-                return StatusCode(500, new
+                return StatusCode((int)response.StatusCode, new
                 {
                     status = "failure",
-                    message = "Internal server error",
-                    details = ex.Message
+                    message = "Graph deletion failed",
+                    details = errorBody
                 });
             }
+
+            return Ok(new { status = "success", message = "Meeting cancelled successfully." });
         }
     }
 }
