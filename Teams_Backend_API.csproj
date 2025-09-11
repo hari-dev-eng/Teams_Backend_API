@@ -9,7 +9,6 @@
   <ItemGroup>
     <PackageReference Include="Azure.Identity" Version="1.15.0" />
     <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="8.0.8" />
-    <PackageReference Include="Microsoft.Azure.ActiveDirectory.GraphClient" Version="2.1.1" />
     <PackageReference Include="Microsoft.Graph" Version="5.60.0" />
     <PackageReference Include="Microsoft.Identity.Client" Version="4.73.1" />
 	  <PackageReference Include="Microsoft.Identity.Web" Version="1.25.9" />
