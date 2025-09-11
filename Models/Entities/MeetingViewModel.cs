@@ -11,5 +11,6 @@ namespace Teams_Backend_API.Models.Entities
         public string? OrganizerEmail { get; set; }
         public string? Location { get; set; }
         public int AttendeeCount { get; set; }
+        public string? Id { get; internal set; }
     }
 }
