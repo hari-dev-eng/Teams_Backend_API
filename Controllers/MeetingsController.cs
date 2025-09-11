@@ -226,29 +226,15 @@ namespace OutLook_Events
         [HttpDelete("{eventId}")]
         public async Task<IActionResult> DeleteMeeting(
             string eventId,
-            [FromQuery] string calendarEmail,
-            [FromQuery] string signedInUser)
+            [FromQuery] string organizerEmail)  // pass the real organizer email, not room
         {
-            if (string.IsNullOrWhiteSpace(eventId) ||
-                string.IsNullOrWhiteSpace(calendarEmail) ||
-                string.IsNullOrWhiteSpace(signedInUser))
+            if (string.IsNullOrWhiteSpace(eventId) || string.IsNullOrWhiteSpace(organizerEmail))
             {
-                return BadRequest(new
-                {
-                    status = "failure",
-                    message = "eventId, calendarEmail, and signedInUser are required."
-                });
+                return BadRequest(new { status = "failure", message = "eventId and organizerEmail are required." });
             }
 
             try
             {
-                // Enforce security: only allow the organizer (signed-in user must match organizer mailbox)
-                if (!calendarEmail.Equals(signedInUser, StringComparison.OrdinalIgnoreCase))
-                {
-                    return Forbid(); // 403
-                }
-
-                // Acquire Graph token with app identity
                 var clientId = _config["AzureAd:ClientId"];
                 var clientSecret = _config["AzureAd:ClientSecret"];
                 var tenantId = _config["AzureAd:TenantId"];
@@ -266,18 +252,16 @@ namespace OutLook_Events
                 httpClient.DefaultRequestHeaders.Authorization =
                     new AuthenticationHeaderValue("Bearer", token.AccessToken);
 
-                // Build delete endpoint (user = organizer mailbox, not room mailbox)
-                var endpoint = $"https://graph.microsoft.com/v1.0/users/{Uri.EscapeDataString(signedInUser)}/events/{Uri.EscapeDataString(eventId)}";
-
+                // Delete from the organizer’s mailbox so Teams reflects it
+                var endpoint = $"https://graph.microsoft.com/v1.0/users/{Uri.EscapeDataString(organizerEmail)}/events/{Uri.EscapeDataString(eventId)}";
 
                 var response = await httpClient.DeleteAsync(endpoint);
 
                 if (!response.IsSuccessStatusCode)
                 {
                     var errorBody = await response.Content.ReadAsStringAsync();
-                    _logger.LogWarning(
-                        "Failed to delete event {EventId} from {Calendar}: {Status} {Body}",
-                        eventId, calendarEmail, response.StatusCode, errorBody);
+                    _logger.LogWarning("Failed to delete event {EventId} from {Organizer}: {Status} {Body}",
+                        eventId, organizerEmail, response.StatusCode, errorBody);
 
                     return StatusCode((int)response.StatusCode, new
                     {
@@ -291,7 +275,7 @@ namespace OutLook_Events
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error deleting meeting {EventId} from {Calendar}", eventId, calendarEmail);
+                _logger.LogError(ex, "Error deleting meeting {EventId} from {Organizer}", eventId, organizerEmail);
                 return StatusCode(500, new
                 {
                     status = "failure",
