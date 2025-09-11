@@ -12,5 +12,6 @@ namespace Teams_Backend_API.Models.Entities
         public string? Location { get; set; }
         public int AttendeeCount { get; set; }
         public string? Id { get; internal set; }
+        public string? ICalUId { get; internal set; }
     }
 }

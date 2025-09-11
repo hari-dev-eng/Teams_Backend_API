@@ -135,7 +135,7 @@ namespace OutLook_Events
                             $"?startDateTime={Uri.EscapeDataString(fmt(startOfDayIst))}" +
                             $"&endDateTime={Uri.EscapeDataString(fmt(endOfDayIst))}" +
                             $"&$top=200&$orderby=start/dateTime" +
-                            "&$select=subject,organizer,start,end,location,attendees";
+                            "&$select=id,subject,organizer,start,end,location,attendees,iCalUId";
 
                         var response = await httpClient.GetAsync(endpoint);
 
@@ -182,11 +182,13 @@ namespace OutLook_Events
                             var organizerName = ev.SelectToken("organizer.emailAddress.name")?.ToString();
                             var organizerEmail = ev.SelectToken("organizer.emailAddress.address")?.ToString();
 
-                            var eventId = ev.SelectToken("id")?.ToString();   // <-- add this
+                            var eventId = ev.SelectToken("id")?.ToString();
+                            var icalUid = ev.SelectToken("iCalUId")?.ToString();
 
                             allMeetings.Add(new MeetingViewModel
                             {
                                 Id = eventId,
+                                ICalUId = icalUid,
                                 Subject = subjectStr,
                                 StartTime = startIst.ToString("yyyy-MM-dd'T'HH:mm:ss"),
                                 EndTime = endIst.ToString("yyyy-MM-dd'T'HH:mm:ss"),
@@ -222,11 +224,13 @@ namespace OutLook_Events
                 return StatusCode(500, new { status = "failure", message = "Internal server error", details = ex.Message });
             }
         }
-        [HttpDelete("{eventId}")]
-        public async Task<IActionResult> DeleteMeeting(string eventId, [FromQuery] string calendarEmail)
+        [HttpDelete("by-ical/{icalUid}")]
+        public async Task<IActionResult> DeleteMeeting(
+     string icalUid,
+     [FromQuery] string organizerEmail)
         {
-            if (string.IsNullOrWhiteSpace(eventId) || string.IsNullOrWhiteSpace(calendarEmail))
-                return BadRequest(new { status = "failure", message = "eventId and calendarEmail are required." });
+            if (string.IsNullOrWhiteSpace(icalUid) || string.IsNullOrWhiteSpace(organizerEmail))
+                return BadRequest(new { status = "failure", message = "icalUid and organizerEmail are required." });
 
             var clientId = _config["AzureAd:ClientId"];
             var clientSecret = _config["AzureAd:ClientSecret"];
@@ -245,26 +249,34 @@ namespace OutLook_Events
             httpClient.DefaultRequestHeaders.Authorization =
                 new AuthenticationHeaderValue("Bearer", token.AccessToken);
 
-            var endpoint =
-                $"https://graph.microsoft.com/v1.0/users/{Uri.EscapeDataString(calendarEmail)}/events/{Uri.EscapeDataString(eventId)}";
+            // Step 1: lookup the eventId in organizer’s mailbox via iCalUId
+            var lookupUrl = $"https://graph.microsoft.com/v1.0/users/{Uri.EscapeDataString(organizerEmail)}/events?$filter=iCalUId eq '{icalUid}'";
+            var lookupResp = await httpClient.GetAsync(lookupUrl);
 
-            var response = await httpClient.DeleteAsync(endpoint);
-
-            if (!response.IsSuccessStatusCode)
+            if (!lookupResp.IsSuccessStatusCode)
             {
-                var errorBody = await response.Content.ReadAsStringAsync();
-                _logger.LogWarning("Failed to delete event {EventId} from {Calendar}: {Status} {Body}",
-                    eventId, calendarEmail, response.StatusCode, errorBody);
+                var lookupError = await lookupResp.Content.ReadAsStringAsync();
+                return StatusCode((int)lookupResp.StatusCode, new { status = "failure", message = "Lookup failed", details = lookupError });
+            }
 
-                return StatusCode((int)response.StatusCode, new
-                {
-                    status = "failure",
-                    message = "Graph deletion failed",
-                    details = errorBody
-                });
+            var lookupJson = JObject.Parse(await lookupResp.Content.ReadAsStringAsync());
+            var organizerEventId = lookupJson["value"]?.FirstOrDefault()?["id"]?.ToString();
+
+            if (string.IsNullOrEmpty(organizerEventId))
+                return NotFound(new { status = "failure", message = "Event not found in organizer’s mailbox" });
+
+            // Step 2: delete the event
+            var deleteUrl = $"https://graph.microsoft.com/v1.0/users/{Uri.EscapeDataString(organizerEmail)}/events/{Uri.EscapeDataString(organizerEventId)}";
+            var deleteResp = await httpClient.DeleteAsync(deleteUrl);
+
+            if (!deleteResp.IsSuccessStatusCode)
+            {
+                var errorBody = await deleteResp.Content.ReadAsStringAsync();
+                return StatusCode((int)deleteResp.StatusCode, new { status = "failure", message = "Graph deletion failed", details = errorBody });
             }
 
             return Ok(new { status = "success", message = "Meeting cancelled successfully." });
         }
+
     }
 }
