@@ -8,7 +8,7 @@ using Microsoft.Graph.Models.ODataErrors;
 using Microsoft.Identity.Client;
 using Azure.Core;
 using Microsoft.Kiota.Abstractions;
-using System.Linq; 
+using System.Linq;
 
 using GraphDayOfWeek = Microsoft.Graph.Models.DayOfWeekObject;
 using KiotaDate = Microsoft.Kiota.Abstractions.Date;
