@@ -26,7 +26,7 @@ namespace OutLook_Events
             _logger = logger;
             _httpClientFactory = httpClientFactory;
         }
-
+        //Create meeting
         [HttpGet]
         public async Task<IActionResult> GetMeetings(
             [FromQuery(Name = "userEmails")] string[]? userEmails,
@@ -219,5 +219,60 @@ namespace OutLook_Events
                 return StatusCode(500, new { status = "failure", message = "Internal server error", details = ex.Message });
             }
         }
+        //Delete meeting
+        [HttpDelete("{eventId}")]
+        public async Task<IActionResult> DeleteMeeting(string eventId,[FromQuery] string calendarEmail,[FromQuery] string signedInUser)
+        {
+            if (string.IsNullOrWhiteSpace(eventId) || string.IsNullOrWhiteSpace(calendarEmail) || string.IsNullOrWhiteSpace(signedInUser))
+                return BadRequest(new { status = "failure", message = "eventId, calendarEmail, and signedInUser are required." });
+
+            try
+            {
+                // Enforce security: only allow the organizer (signed-in user must match organizer mailbox)
+                if (!calendarEmail.Equals(signedInUser, StringComparison.OrdinalIgnoreCase))
+                {
+                    return Forbid(); // 403
+                }
+
+                // Acquire Graph token with app identity
+                var clientId = _config["AzureAd:ClientId"];
+                var clientSecret = _config["AzureAd:ClientSecret"];
+                var tenantId = _config["AzureAd:TenantId"];
+                var scopes = new[] { "https://graph.microsoft.com/.default" };
+
+                IConfidentialClientApplication app = ConfidentialClientApplicationBuilder
+                    .Create(clientId)
+                    .WithClientSecret(clientSecret)
+                    .WithAuthority($"https://login.microsoftonline.com/{tenantId}")
+                    .Build();
+
+                var token = await app.AcquireTokenForClient(scopes).ExecuteAsync();
+
+                using var httpClient = _httpClientFactory.CreateClient();
+                httpClient.DefaultRequestHeaders.Authorization =
+                    new AuthenticationHeaderValue("Bearer", token.AccessToken);
+
+                // Build delete endpoint
+                var endpoint = $"https://graph.microsoft.com/v1.0/users/{Uri.EscapeDataString(calendarEmail)}/events/{Uri.EscapeDataString(eventId)}";
+
+                var response = await httpClient.DeleteAsync(endpoint);
+
+                if (!response.IsSuccessStatusCode)
+                {
+                    var errorBody = await response.Content.ReadAsStringAsync();
+                    _logger.LogWarning("Failed to delete event {EventId} from {Calendar}: {Status} {Body}",
+                        eventId, calendarEmail, response.StatusCode, errorBody);
+                    return StatusCode((int)response.StatusCode, new { status = "failure", message = "Graph deletion failed", details = errorBody });
+                }
+
+                return Ok(new { status = "success", message = "Meeting cancelled successfully." });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error deleting meeting {EventId} from {Calendar}", eventId, calendarEmail);
+                return StatusCode(500, new { status = "failure", message = "Internal server error", details = ex.Message });
+            }
+        }
+
     }
 }
