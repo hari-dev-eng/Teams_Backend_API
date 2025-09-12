@@ -225,29 +225,18 @@ namespace OutLook_Events
             }
         }
         [HttpDelete("by-ical/{icalUid}")]
-        public async Task<IActionResult> DeleteMeeting(
-     string icalUid,
-     [FromQuery] string organizerEmail)
+        public async Task<IActionResult> DeleteMeeting(string icalUid, [FromQuery] string organizerEmail)
         {
             if (string.IsNullOrWhiteSpace(icalUid) || string.IsNullOrWhiteSpace(organizerEmail))
                 return BadRequest(new { status = "failure", message = "icalUid and organizerEmail are required." });
 
-            var clientId = _config["AzureAd:ClientId"];
-            var clientSecret = _config["AzureAd:ClientSecret"];
-            var tenantId = _config["AzureAd:TenantId"];
-            var scopes = new[] { "https://graph.microsoft.com/.default" };
-
-            IConfidentialClientApplication app = ConfidentialClientApplicationBuilder
-                .Create(clientId)
-                .WithClientSecret(clientSecret)
-                .WithAuthority($"https://login.microsoftonline.com/{tenantId}")
-                .Build();
-
-            var token = await app.AcquireTokenForClient(scopes).ExecuteAsync();
+            //Take the delegated token from frontend
+            var jwt = Request.Headers["Authorization"].ToString().Replace("Bearer ", "");
+            if (string.IsNullOrWhiteSpace(jwt))
+                return Unauthorized(new { status = "failure", message = "Missing user access token." });
 
             using var httpClient = _httpClientFactory.CreateClient();
-            httpClient.DefaultRequestHeaders.Authorization =
-                new AuthenticationHeaderValue("Bearer", token.AccessToken);
+            httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", jwt);
 
             // Step 1: lookup the eventId in organizer’s mailbox via iCalUId
             var lookupUrl = $"https://graph.microsoft.com/v1.0/users/{Uri.EscapeDataString(organizerEmail)}/events?$filter=iCalUId eq '{icalUid}'";
@@ -277,6 +266,5 @@ namespace OutLook_Events
 
             return Ok(new { status = "success", message = "Meeting cancelled successfully." });
         }
-
     }
 }
