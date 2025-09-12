@@ -5,10 +5,11 @@ using Microsoft.Identity.Client;
 using Newtonsoft.Json.Linq;
 using System.Collections.Concurrent;
 using Teams_Backend_API.Models.Entities;
+using System.Linq;
+using System.Collections.Generic;
 
 namespace OutLook_Events
 {
-
     [Route("api/[controller]")]
     [ApiController]
     public class MeetingsController : ControllerBase
@@ -26,35 +27,42 @@ namespace OutLook_Events
             _logger = logger;
             _httpClientFactory = httpClientFactory;
         }
-        //Create meeting
+
         [HttpGet]
         public async Task<IActionResult> GetMeetings(
             [FromQuery(Name = "userEmails")] string[]? userEmails,
             [FromQuery] string? date = null)
         {
-            // Fallback if client sends userEmail instead of userEmails (backward compat)
             if ((userEmails == null || userEmails.Length == 0) && Request.Query.TryGetValue("userEmail", out var single))
             {
                 userEmails = new[] { single.ToString() };
             }
 
-            // Default emails if none are provided
             if (userEmails == null || userEmails.Length == 0)
             {
                 userEmails = new[]
                 {
-                      "ffmeeting@conservesolution.com",
-                      "gfmeeting@conservesolution.com",
-                      "sfmeeting@conservesolution.com",
-                      "contconference@conservesolution.com"
-
+                    "ffmeeting@conservesolution.com", 
+                    "gfmeeting@conservesolution.com",  
+                    "sfmeeting@conservesolution.com",   
+                    "contconference@conservesolution.com"
                 };
             }
 
             if (userEmails.Any(e => !e.Contains("@")))
                 return BadRequest(new { status = "failure", message = "Invalid email addresses." });
 
-            // Validate Azure AD config (prevents “works local, fails in host” when env vars are missing)
+            // Map each room mailbox to the friendly room name you show in the UI.
+            var mailboxToRoomName = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["gfmeeting@conservesolution.com"] = "Ground Floor Meeting Room",
+                ["ffmeeting@conservesolution.com"] = "1st Floor Meeting Room",
+                ["contconference@conservesolution.com"] = "Conference Room",
+                ["sfmeeting@conservesolution.com"] = "3rd Floor Meeting Room",
+            };
+
+            var allowedLocations = new HashSet<string>(mailboxToRoomName.Values, StringComparer.OrdinalIgnoreCase);
+
             var clientId = _config["AzureAd:ClientId"];
             var clientSecret = _config["AzureAd:ClientSecret"];
             var tenantId = _config["AzureAd:TenantId"];
@@ -68,7 +76,6 @@ namespace OutLook_Events
 
             try
             {
-                // Acquire Graph token (client credentials)
                 var scopes = new[] { "https://graph.microsoft.com/.default" };
                 IConfidentialClientApplication app = ConfidentialClientApplicationBuilder
                     .Create(clientId)
@@ -78,11 +85,9 @@ namespace OutLook_Events
 
                 var token = await app.AcquireTokenForClient(scopes).ExecuteAsync();
 
-                // Time handling — ASK GRAPH to return IST directly
                 const string OutlookTz = "India Standard Time";
                 var istZone = TimeZoneInfo.FindSystemTimeZoneById(OutlookTz);
 
-                // Parse the requested date with multiple accepted formats
                 var acceptedFormats = new[]
                 {
                     "dd-M-yyyy", "d-M-yyyy", "dd-MM-yyyy",
@@ -94,7 +99,6 @@ namespace OutLook_Events
                     DateTime.TryParseExact(date, acceptedFormats, CultureInfo.InvariantCulture,
                         DateTimeStyles.None, out var parsed))
                 {
-                    // Treat parsed as IST calendar date (no time)
                     selectedDateIst = parsed.Date;
                 }
                 else
@@ -102,23 +106,12 @@ namespace OutLook_Events
                     selectedDateIst = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, istZone).Date;
                 }
 
-                // Build the start/end of day in IST (strings without zone; Graph will interpret as IST due to Prefer header)
                 var startOfDayIst = new DateTime(selectedDateIst.Year, selectedDateIst.Month, selectedDateIst.Day, 0, 0, 0);
                 var endOfDayIst = startOfDayIst.AddDays(1).AddSeconds(-1);
-
-                string fmt(DateTime dt) => dt.ToString("yyyy-MM-dd'T'HH:mm:ss"); // do NOT append 'Z'
-
-                var allowedLocations = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-                {
-                    "Ground Floor Meeting Room",
-                    "1st Floor Meeting Room",
-                    "Conference Room",
-                    "3rd Floor Meeting Room"
-                };
+                string fmt(DateTime dt) => dt.ToString("yyyy-MM-dd'T'HH:mm:ss");
 
                 var allMeetings = new ConcurrentBag<MeetingViewModel>();
 
-                // Query each mailbox in parallel using /calendarView (range-filtered) and IST preference
                 var tasks = userEmails.Select(async email =>
                 {
                     try
@@ -126,19 +119,17 @@ namespace OutLook_Events
                         using var httpClient = _httpClientFactory.CreateClient();
                         httpClient.DefaultRequestHeaders.Authorization =
                             new AuthenticationHeaderValue("Bearer", token.AccessToken);
-
-                        // Ask Graph to return times in IST so we don't perform any UTC conversion
                         httpClient.DefaultRequestHeaders.Add("Prefer", $"outlook.timezone=\"{OutlookTz}\"");
 
+                        // NOTE: include 'locations' so we can see every room when multiple are selected
                         var endpoint =
                             $"https://graph.microsoft.com/v1.0/users/{Uri.EscapeDataString(email)}/calendar/calendarView" +
                             $"?startDateTime={Uri.EscapeDataString(fmt(startOfDayIst))}" +
                             $"&endDateTime={Uri.EscapeDataString(fmt(endOfDayIst))}" +
                             $"&$top=200&$orderby=start/dateTime" +
-                            "&$select=id,subject,organizer,start,end,location,attendees,iCalUId";
+                            "&$select=id,subject,organizer,start,end,location,locations,attendees,iCalUId";
 
                         var response = await httpClient.GetAsync(endpoint);
-
                         if (!response.IsSuccessStatusCode)
                         {
                             _logger.LogWarning("Graph request failed for {Email} with {Code}: {Reason}",
@@ -151,15 +142,11 @@ namespace OutLook_Events
                         var events = parsedJson["value"];
                         if (events == null || !events.Any()) return;
 
+                        // Friendly room for THIS mailbox
+                        mailboxToRoomName.TryGetValue(email, out var thisMailboxRoomName);
+
                         foreach (var ev in events)
                         {
-                            //_logger.LogInformation("Event data: {EventData}", ev.ToString());
-
-                            var location = ev.SelectToken("location.displayName")?.ToString()?.Trim();
-                            if (string.IsNullOrWhiteSpace(location) || !allowedLocations.Contains(location))
-                                continue;
-
-                            // Times are already in IST due to Prefer header
                             var startStr = ev.SelectToken("start.dateTime")?.ToString();
                             var endStr = ev.SelectToken("end.dateTime")?.ToString();
 
@@ -167,23 +154,69 @@ namespace OutLook_Events
                                 !DateTime.TryParse(endStr, out var endIst))
                                 continue;
 
-                            // Extra guard: keep only the selected day (in case of multi-day events)
+                            // keep the selected day (if you have cross-midnight events, relax this)
                             if (startIst.Date != selectedDateIst) continue;
 
-                            int attendeeCount = 0;
-                            var attendeesToken = ev.SelectToken("attendees");
-                            if (attendeesToken is JArray arr) attendeeCount = arr.Count;
+                            // Collect every possible room name from Graph
+                            var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-                            // Use consistent SelectToken approach for all properties
+                            var primaryLocation = ev.SelectToken("location.displayName")?.ToString()?.Trim();
+                            if (!string.IsNullOrWhiteSpace(primaryLocation))
+                                names.Add(primaryLocation);
+
+                            if (ev["locations"] is JArray jLocs)
+                            {
+                                foreach (var loc in jLocs)
+                                {
+                                    var ln = loc["displayName"]?.ToString()?.Trim();
+                                    if (!string.IsNullOrWhiteSpace(ln)) names.Add(ln);
+                                }
+                            }
+
+                            if (ev["attendees"] is JArray jAtt)
+                            {
+                                foreach (var a in jAtt)
+                                {
+                                    var type = a["type"]?.ToString();
+                                    if (string.Equals(type, "resource", StringComparison.OrdinalIgnoreCase))
+                                    {
+                                        var rn = a["emailAddress"]?["name"]?.ToString()?.Trim();
+                                        if (!string.IsNullOrWhiteSpace(rn)) names.Add(rn);
+                                    }
+                                }
+                            }
+
+                            // Intersect with our known rooms
+                            var roomHits = names.Where(n => allowedLocations.Contains(n)).ToList();
+
+                            // Decide if this event belongs to THIS mailbox' room
+                            // - If we know the friendly name for this mailbox, include only when it’s in the event’s rooms
+                            // - If Graph didn’t give names (edge), still include for this mailbox as a fallback
+                            bool includeForThisMailbox =
+                                (!string.IsNullOrEmpty(thisMailboxRoomName) && roomHits.Contains(thisMailboxRoomName))
+                                || (string.IsNullOrEmpty(thisMailboxRoomName) && roomHits.Count > 0)
+                                || (roomHits.Count == 0 && !string.IsNullOrEmpty(thisMailboxRoomName));
+
+                            if (!includeForThisMailbox)
+                                continue;
+
+                            int attendeeCount = 0;
+                            if (ev["attendees"] is JArray arr) attendeeCount = arr.Count;
+
                             var subjectStr = ev.SelectToken("subject")?.ToString();
-                            if (string.IsNullOrWhiteSpace(subjectStr))
-                                subjectStr = "[No Title]";
+                            if (string.IsNullOrWhiteSpace(subjectStr)) subjectStr = "[No Title]";
 
                             var organizerName = ev.SelectToken("organizer.emailAddress.name")?.ToString();
                             var organizerEmail = ev.SelectToken("organizer.emailAddress.address")?.ToString();
 
                             var eventId = ev.SelectToken("id")?.ToString();
                             var icalUid = ev.SelectToken("iCalUId")?.ToString();
+
+                            // Use the mailbox’s friendly room name as Location so each room row shows correctly
+                            var effectiveLocation = thisMailboxRoomName
+                                                    ?? roomHits.FirstOrDefault()
+                                                    ?? primaryLocation
+                                                    ?? "Unknown";
 
                             allMeetings.Add(new MeetingViewModel
                             {
@@ -194,7 +227,7 @@ namespace OutLook_Events
                                 EndTime = endIst.ToString("yyyy-MM-dd'T'HH:mm:ss"),
                                 Organizer = organizerName,
                                 OrganizerEmail = organizerEmail,
-                                Location = location,
+                                Location = effectiveLocation,
                                 AttendeeCount = attendeeCount
                             });
                         }
@@ -207,11 +240,52 @@ namespace OutLook_Events
 
                 await Task.WhenAll(tasks);
 
-                var meetings = allMeetings
-                    .OrderBy(m => m.StartTime, StringComparer.Ordinal)
+                // === MULTI-ROOM ENRICHMENT (group by iCalUId or fallback key) ===
+                var list = allMeetings.ToList();
+
+                string KeyFor(MeetingViewModel m) =>
+                    (m.ICalUId ?? $"{m.Subject}|{m.StartTime}|{m.EndTime}|{m.OrganizerEmail}")
+                        .ToLowerInvariant();
+
+                var roomsByKey = list
+                    .GroupBy(m => KeyFor(m))
+                    .ToDictionary(
+                        g => g.Key,
+                        g => g.Select(x => x.Location)
+                              .Where(s => !string.IsNullOrWhiteSpace(s))
+                              .Distinct(StringComparer.OrdinalIgnoreCase)
+                              .OrderBy(s => s)
+                              .ToList()
+                    );
+
+                var enriched = list
+                    .Select(m =>
+                    {
+                        var k = KeyFor(m);
+                        var rooms = roomsByKey.TryGetValue(k, out var r)
+                            ? r
+                            : new List<string> { m.Location ?? "Unknown" };
+
+                        return new
+                        {
+                            id = m.Id,
+                            iCalUId = m.ICalUId,
+                            subject = m.Subject,
+                            startTime = m.StartTime,
+                            endTime = m.EndTime,
+                            organizer = m.Organizer,
+                            organizerEmail = m.OrganizerEmail,
+                            location = m.Location,
+                            attendeeCount = m.AttendeeCount,
+                            multiRooms = rooms,
+                            multiRoomCount = rooms.Count,
+                            multiRoom = rooms.Count > 1
+                        };
+                    })
+                    .OrderBy(x => x.startTime, StringComparer.Ordinal)
                     .ToList();
 
-                return Ok(new { status = "success", count = meetings.Count, meetings });
+                return Ok(new { status = "success", count = enriched.Count, meetings = enriched });
             }
             catch (MsalServiceException msalEx)
             {
@@ -224,13 +298,13 @@ namespace OutLook_Events
                 return StatusCode(500, new { status = "failure", message = "Internal server error", details = ex.Message });
             }
         }
+
         [HttpDelete("by-ical/{icalUid}")]
         public async Task<IActionResult> DeleteMeeting(string icalUid, [FromQuery] string organizerEmail)
         {
             if (string.IsNullOrWhiteSpace(icalUid) || string.IsNullOrWhiteSpace(organizerEmail))
                 return BadRequest(new { status = "failure", message = "icalUid and organizerEmail are required." });
 
-            //Take the delegated token from frontend
             var jwt = Request.Headers["Authorization"].ToString().Replace("Bearer ", "");
             if (string.IsNullOrWhiteSpace(jwt))
                 return Unauthorized(new { status = "failure", message = "Missing user access token." });
@@ -238,7 +312,6 @@ namespace OutLook_Events
             using var httpClient = _httpClientFactory.CreateClient();
             httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", jwt);
 
-            // Step 1: lookup the eventId in organizer’s mailbox via iCalUId
             var lookupUrl = $"https://graph.microsoft.com/v1.0/users/{Uri.EscapeDataString(organizerEmail)}/events?$filter=iCalUId eq '{icalUid}'";
             var lookupResp = await httpClient.GetAsync(lookupUrl);
 
@@ -254,7 +327,6 @@ namespace OutLook_Events
             if (string.IsNullOrEmpty(organizerEventId))
                 return NotFound(new { status = "failure", message = "Event not found in organizer’s mailbox" });
 
-            // Step 2: delete the event
             var deleteUrl = $"https://graph.microsoft.com/v1.0/users/{Uri.EscapeDataString(organizerEmail)}/events/{Uri.EscapeDataString(organizerEventId)}";
             var deleteResp = await httpClient.DeleteAsync(deleteUrl);
 
@@ -263,7 +335,6 @@ namespace OutLook_Events
                 var errorBody = await deleteResp.Content.ReadAsStringAsync();
                 return StatusCode((int)deleteResp.StatusCode, new { status = "failure", message = "Graph deletion failed", details = errorBody });
             }
-
             return Ok(new { status = "success", message = "Meeting cancelled successfully." });
         }
     }
