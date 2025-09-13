@@ -7,6 +7,9 @@ using System.Collections.Concurrent;
 using Teams_Backend_API.Models.Entities;
 using System.Linq;
 using System.Collections.Generic;
+using Microsoft.AspNetCore.Http;
+using System.IdentityModel.Tokens.Jwt;
+using System.Security.Claims;
 
 namespace OutLook_Events
 {
@@ -14,6 +17,15 @@ namespace OutLook_Events
     [ApiController]
     public class MeetingsController : ControllerBase
     {
+        private static readonly string OrgDomain = "conservesolution.com";
+
+        // <<< STATIC ADMIN EMAILS (super-admins) >>>
+        private static readonly HashSet<string> AdminEmails = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "hariprasath.c@conservesolution.com",
+            "madhanraj@conservesolution.com",
+        };
+
         private readonly IConfiguration _config;
         private readonly ILogger<MeetingsController> _logger;
         private readonly IHttpClientFactory _httpClientFactory;
@@ -26,6 +38,45 @@ namespace OutLook_Events
             _config = config;
             _logger = logger;
             _httpClientFactory = httpClientFactory;
+        }
+
+        private IConfidentialClientApplication BuildApp()
+        {
+            var clientId = _config["AzureAd:ClientId"];
+            var clientSecret = _config["AzureAd:ClientSecret"];
+            var tenantId = _config["AzureAd:TenantId"];
+
+            if (string.IsNullOrWhiteSpace(clientId) ||
+                string.IsNullOrWhiteSpace(clientSecret) ||
+                string.IsNullOrWhiteSpace(tenantId))
+            {
+                throw new ApplicationException("Azure AD configuration missing (ClientId/ClientSecret/TenantId).");
+            }
+
+            return ConfidentialClientApplicationBuilder
+                .Create(clientId)
+                .WithClientSecret(clientSecret)
+                .WithAuthority($"https://login.microsoftonline.com/{tenantId}")
+                .Build();
+        }
+
+        private static string? GetEmailFromJwt(string jwt)
+        {
+            try
+            {
+                var handler = new JwtSecurityTokenHandler();
+                var token = handler.ReadJwtToken(jwt);
+                // Common email-ish claims Microsoft issues
+                var email = token.Claims.FirstOrDefault(c =>
+                                c.Type.Equals("preferred_username", StringComparison.OrdinalIgnoreCase) ||
+                                c.Type.Equals("upn", StringComparison.OrdinalIgnoreCase) ||
+                                c.Type.Equals(ClaimTypes.Upn, StringComparison.OrdinalIgnoreCase) ||
+                                c.Type.Equals(ClaimTypes.Email, StringComparison.OrdinalIgnoreCase) ||
+                                c.Type.Equals("unique_name", StringComparison.OrdinalIgnoreCase))
+                            ?.Value;
+                return email?.ToLowerInvariant();
+            }
+            catch { return null; }
         }
 
         [HttpGet]
@@ -42,9 +93,9 @@ namespace OutLook_Events
             {
                 userEmails = new[]
                 {
-                    "ffmeeting@conservesolution.com", 
-                    "gfmeeting@conservesolution.com",  
-                    "sfmeeting@conservesolution.com",   
+                    "ffmeeting@conservesolution.com",
+                    "gfmeeting@conservesolution.com",
+                    "sfmeeting@conservesolution.com",
                     "contconference@conservesolution.com"
                 };
             }
@@ -52,7 +103,6 @@ namespace OutLook_Events
             if (userEmails.Any(e => !e.Contains("@")))
                 return BadRequest(new { status = "failure", message = "Invalid email addresses." });
 
-            // Map each room mailbox to the friendly room name you show in the UI.
             var mailboxToRoomName = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
             {
                 ["gfmeeting@conservesolution.com"] = "Ground Floor Meeting Room",
@@ -63,26 +113,10 @@ namespace OutLook_Events
 
             var allowedLocations = new HashSet<string>(mailboxToRoomName.Values, StringComparer.OrdinalIgnoreCase);
 
-            var clientId = _config["AzureAd:ClientId"];
-            var clientSecret = _config["AzureAd:ClientSecret"];
-            var tenantId = _config["AzureAd:TenantId"];
-            if (string.IsNullOrWhiteSpace(clientId) ||
-                string.IsNullOrWhiteSpace(clientSecret) ||
-                string.IsNullOrWhiteSpace(tenantId))
-            {
-                _logger.LogError("Azure AD configuration missing (ClientId/ClientSecret/TenantId).");
-                return StatusCode(500, new { status = "failure", message = "Azure AD configuration missing in server." });
-            }
-
             try
             {
                 var scopes = new[] { "https://graph.microsoft.com/.default" };
-                IConfidentialClientApplication app = ConfidentialClientApplicationBuilder
-                    .Create(clientId)
-                    .WithClientSecret(clientSecret)
-                    .WithAuthority($"https://login.microsoftonline.com/{tenantId}")
-                    .Build();
-
+                var app = BuildApp();
                 var token = await app.AcquireTokenForClient(scopes).ExecuteAsync();
 
                 const string OutlookTz = "India Standard Time";
@@ -121,7 +155,6 @@ namespace OutLook_Events
                             new AuthenticationHeaderValue("Bearer", token.AccessToken);
                         httpClient.DefaultRequestHeaders.Add("Prefer", $"outlook.timezone=\"{OutlookTz}\"");
 
-                        // NOTE: include 'locations' so we can see every room when multiple are selected
                         var endpoint =
                             $"https://graph.microsoft.com/v1.0/users/{Uri.EscapeDataString(email)}/calendar/calendarView" +
                             $"?startDateTime={Uri.EscapeDataString(fmt(startOfDayIst))}" +
@@ -142,7 +175,6 @@ namespace OutLook_Events
                         var events = parsedJson["value"];
                         if (events == null || !events.Any()) return;
 
-                        // Friendly room for THIS mailbox
                         mailboxToRoomName.TryGetValue(email, out var thisMailboxRoomName);
 
                         foreach (var ev in events)
@@ -154,15 +186,11 @@ namespace OutLook_Events
                                 !DateTime.TryParse(endStr, out var endIst))
                                 continue;
 
-                            // keep the selected day (if you have cross-midnight events, relax this)
                             if (startIst.Date != selectedDateIst) continue;
 
-                            // Collect every possible room name from Graph
                             var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-
                             var primaryLocation = ev.SelectToken("location.displayName")?.ToString()?.Trim();
-                            if (!string.IsNullOrWhiteSpace(primaryLocation))
-                                names.Add(primaryLocation);
+                            if (!string.IsNullOrWhiteSpace(primaryLocation)) names.Add(primaryLocation);
 
                             if (ev["locations"] is JArray jLocs)
                             {
@@ -186,19 +214,13 @@ namespace OutLook_Events
                                 }
                             }
 
-                            // Intersect with our known rooms
                             var roomHits = names.Where(n => allowedLocations.Contains(n)).ToList();
-
-                            // Decide if this event belongs to THIS mailbox' room
-                            // - If we know the friendly name for this mailbox, include only when it’s in the event’s rooms
-                            // - If Graph didn’t give names (edge), still include for this mailbox as a fallback
                             bool includeForThisMailbox =
                                 (!string.IsNullOrEmpty(thisMailboxRoomName) && roomHits.Contains(thisMailboxRoomName))
                                 || (string.IsNullOrEmpty(thisMailboxRoomName) && roomHits.Count > 0)
                                 || (roomHits.Count == 0 && !string.IsNullOrEmpty(thisMailboxRoomName));
 
-                            if (!includeForThisMailbox)
-                                continue;
+                            if (!includeForThisMailbox) continue;
 
                             int attendeeCount = 0;
                             if (ev["attendees"] is JArray arr) attendeeCount = arr.Count;
@@ -212,11 +234,11 @@ namespace OutLook_Events
                             var eventId = ev.SelectToken("id")?.ToString();
                             var icalUid = ev.SelectToken("iCalUId")?.ToString();
 
-                            // Use the mailbox’s friendly room name as Location so each room row shows correctly
-                            var effectiveLocation = thisMailboxRoomName
-                                                    ?? roomHits.FirstOrDefault()
-                                                    ?? primaryLocation
-                                                    ?? "Unknown";
+                            var effectiveLocation =
+                                thisMailboxRoomName
+                                ?? roomHits.FirstOrDefault()
+                                ?? primaryLocation
+                                ?? "Unknown";
 
                             allMeetings.Add(new MeetingViewModel
                             {
@@ -240,12 +262,10 @@ namespace OutLook_Events
 
                 await Task.WhenAll(tasks);
 
-                // === MULTI-ROOM ENRICHMENT (group by iCalUId or fallback key) ===
                 var list = allMeetings.ToList();
 
                 string KeyFor(MeetingViewModel m) =>
-                    (m.ICalUId ?? $"{m.Subject}|{m.StartTime}|{m.EndTime}|{m.OrganizerEmail}")
-                        .ToLowerInvariant();
+                    (m.ICalUId ?? $"{m.Subject}|{m.StartTime}|{m.EndTime}|{m.OrganizerEmail}").ToLowerInvariant();
 
                 var roomsByKey = list
                     .GroupBy(m => KeyFor(m))
@@ -253,6 +273,7 @@ namespace OutLook_Events
                         g => g.Key,
                         g => g.Select(x => x.Location)
                               .Where(s => !string.IsNullOrWhiteSpace(s))
+                              .Select(s => s!)
                               .Distinct(StringComparer.OrdinalIgnoreCase)
                               .OrderBy(s => s)
                               .ToList()
@@ -299,6 +320,29 @@ namespace OutLook_Events
             }
         }
 
+        private async Task<(bool ok, string? eventId, string? error, int status)> FindOrganizerEventId(HttpClient httpClient, string organizerEmail, string icalUid)
+        {
+            var lookupUrl = $"https://graph.microsoft.com/v1.0/users/{Uri.EscapeDataString(organizerEmail)}/events?$filter=iCalUId eq '{icalUid}'";
+            var lookupResp = await httpClient.GetAsync(lookupUrl);
+            if (!lookupResp.IsSuccessStatusCode)
+            {
+                var body = await lookupResp.Content.ReadAsStringAsync();
+                return (false, null, body, (int)lookupResp.StatusCode);
+            }
+            var lookupJson = JObject.Parse(await lookupResp.Content.ReadAsStringAsync());
+            var organizerEventId = lookupJson["value"]?.FirstOrDefault()?["id"]?.ToString();
+            if (string.IsNullOrEmpty(organizerEventId))
+                return (false, null, "Event not found in organizer’s mailbox", 404);
+            return (true, organizerEventId, null, 200);
+        }
+
+        private static bool IsCompleted(string startIso, string endIso)
+        {
+            if (!DateTime.TryParse(startIso, out var s)) return false;
+            if (!DateTime.TryParse(endIso, out var e)) return false;
+            return DateTime.UtcNow > e.ToUniversalTime();
+        }
+
         [HttpDelete("by-ical/{icalUid}")]
         public async Task<IActionResult> DeleteMeeting(string icalUid, [FromQuery] string organizerEmail)
         {
@@ -309,33 +353,158 @@ namespace OutLook_Events
             if (string.IsNullOrWhiteSpace(jwt))
                 return Unauthorized(new { status = "failure", message = "Missing user access token." });
 
-            using var httpClient = _httpClientFactory.CreateClient();
-            httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", jwt);
+            var callerEmail = GetEmailFromJwt(jwt);
+            var isAdmin = callerEmail != null && AdminEmails.Contains(callerEmail);
+            var isOrgMail = callerEmail != null && callerEmail.EndsWith($"@{OrgDomain}", StringComparison.OrdinalIgnoreCase);
+            if (!isAdmin && !isOrgMail)
+                return StatusCode(new { status = "failure", message = $"Please sign in with your @{OrgDomain} account." });
 
-            var lookupUrl = $"https://graph.microsoft.com/v1.0/users/{Uri.EscapeDataString(organizerEmail)}/events?$filter=iCalUId eq '{icalUid}'";
-            var lookupResp = await httpClient.GetAsync(lookupUrl);
-
-            if (!lookupResp.IsSuccessStatusCode)
+            try
             {
-                var lookupError = await lookupResp.Content.ReadAsStringAsync();
-                return StatusCode((int)lookupResp.StatusCode, new { status = "failure", message = "Lookup failed", details = lookupError });
+                // choose token: admin => app-only; else => user delegated
+                HttpClient httpClient = _httpClientFactory.CreateClient();
+                if (isAdmin)
+                {
+                    var app = BuildApp();
+                    var scopes = new[] { "https://graph.microsoft.com/.default" };
+                    var appToken = await app.AcquireTokenForClient(scopes).ExecuteAsync();
+                    httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", appToken.AccessToken);
+                }
+                else
+                {
+                    httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", jwt);
+                }
+
+                // find the event id in organizer’s mailbox
+                var (ok, eventId, error, status) = await FindOrganizerEventId(httpClient, organizerEmail, icalUid);
+                if (!ok) return StatusCode(status, new { status = "failure", message = "Lookup failed", details = error });
+
+                // (Optional) non-admins cannot delete completed meetings
+                if (!isAdmin)
+                {
+                    // fetch event to verify dates (very cheap call)
+                    var evUrl = $"https://graph.microsoft.com/v1.0/users/{Uri.EscapeDataString(organizerEmail)}/events/{Uri.EscapeDataString(eventId!)}?$select=start,end";
+                    var evResp = await httpClient.GetAsync(evUrl);
+                    if (evResp.IsSuccessStatusCode)
+                    {
+                        var obj = JObject.Parse(await evResp.Content.ReadAsStringAsync());
+                        var startIso = obj.SelectToken("start.dateTime")?.ToString() ?? "";
+                        var endIso = obj.SelectToken("end.dateTime")?.ToString() ?? "";
+                        if (IsCompleted(startIso, endIso))
+                            return StatusCode(new { status = "failure", message = "Completed meetings cannot be deleted by non-admins." });
+                    }
+                }
+
+                // delete
+                var deleteUrl = $"https://graph.microsoft.com/v1.0/users/{Uri.EscapeDataString(organizerEmail)}/events/{Uri.EscapeDataString(eventId!)}";
+                var deleteResp = await httpClient.DeleteAsync(deleteUrl);
+
+                if (!deleteResp.IsSuccessStatusCode)
+                {
+                    var errorBody = await deleteResp.Content.ReadAsStringAsync();
+                    return StatusCode((int)deleteResp.StatusCode, new { status = "failure", message = "Graph deletion failed", details = errorBody });
+                }
+
+                return Ok(new { status = "success", message = "Meeting cancelled successfully." });
             }
-
-            var lookupJson = JObject.Parse(await lookupResp.Content.ReadAsStringAsync());
-            var organizerEventId = lookupJson["value"]?.FirstOrDefault()?["id"]?.ToString();
-
-            if (string.IsNullOrEmpty(organizerEventId))
-                return NotFound(new { status = "failure", message = "Event not found in organizer’s mailbox" });
-
-            var deleteUrl = $"https://graph.microsoft.com/v1.0/users/{Uri.EscapeDataString(organizerEmail)}/events/{Uri.EscapeDataString(organizerEventId)}";
-            var deleteResp = await httpClient.DeleteAsync(deleteUrl);
-
-            if (!deleteResp.IsSuccessStatusCode)
+            catch (MsalServiceException msalEx)
             {
-                var errorBody = await deleteResp.Content.ReadAsStringAsync();
-                return StatusCode((int)deleteResp.StatusCode, new { status = "failure", message = "Graph deletion failed", details = errorBody });
+                _logger.LogError(msalEx, "Azure AD token acquisition failed (admin override).");
+                return StatusCode(500, new { status = "failure", message = "Azure AD token acquisition failed." });
             }
-            return Ok(new { status = "success", message = "Meeting cancelled successfully." });
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Unexpected error in DeleteMeeting");
+                return StatusCode(500, new { status = "failure", message = "Internal server error", details = ex.Message });
+            }
+        }
+
+        public class PatchMeetingDto
+        {
+            public string? Subject { get; set; }
+            public string OrganizerEmail { get; set; } = "";
+        }
+
+        [HttpPatch("by-ical/{icalUid}")]
+        public async Task<IActionResult> PatchMeeting(string icalUid, [FromBody] PatchMeetingDto dto)
+        {
+            if (string.IsNullOrWhiteSpace(icalUid))
+                return BadRequest(new { status = "failure", message = "icalUid is required." });
+            if (dto == null || string.IsNullOrWhiteSpace(dto.OrganizerEmail))
+                return BadRequest(new { status = "failure", message = "OrganizerEmail is required." });
+            if (dto.Subject != null && dto.Subject.Trim().Length < 3)
+                return BadRequest(new { status = "failure", message = "Subject must be at least 3 characters." });
+
+            var jwt = Request.Headers["Authorization"].ToString().Replace("Bearer ", "");
+            if (string.IsNullOrWhiteSpace(jwt))
+                return Unauthorized(new { status = "failure", message = "Missing user access token." });
+
+            var callerEmail = GetEmailFromJwt(jwt);
+            var isAdmin = callerEmail != null && AdminEmails.Contains(callerEmail);
+            var isOrgMail = callerEmail != null && callerEmail.EndsWith($"@{OrgDomain}", StringComparison.OrdinalIgnoreCase);
+            if (!isAdmin && !isOrgMail)
+                return StatusCode(new { status = "failure", message = $"Please sign in with your @{OrgDomain} account." });
+
+            try
+            {
+                HttpClient httpClient = _httpClientFactory.CreateClient();
+                if (isAdmin)
+                {
+                    var app = BuildApp();
+                    var scopes = new[] { "https://graph.microsoft.com/.default" };
+                    var appToken = await app.AcquireTokenForClient(scopes).ExecuteAsync();
+                    httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", appToken.AccessToken);
+                }
+                else
+                {
+                    httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", jwt);
+                }
+
+                // find event id
+                var (ok, eventId, error, status) = await FindOrganizerEventId(httpClient, dto.OrganizerEmail, icalUid);
+                if (!ok) return StatusCode(status, new { status = "failure", message = "Lookup failed", details = error });
+
+                // if not admin, ensure caller is organizer
+                if (!isAdmin && !string.Equals(callerEmail, dto.OrganizerEmail, StringComparison.OrdinalIgnoreCase))
+                    return StatusCode(new { status = "failure", message = "Only the organizer or an admin can edit this meeting." });
+
+                // Apply partial update (subject only for now)
+                var patchBody = new JObject();
+                if (!string.IsNullOrWhiteSpace(dto.Subject)) patchBody["subject"] = dto.Subject.Trim();
+
+                if (!patchBody.HasValues)
+                    return BadRequest(new { status = "failure", message = "No changes to apply." });
+
+                var req = new HttpRequestMessage(new HttpMethod("PATCH"),
+                    $"https://graph.microsoft.com/v1.0/users/{Uri.EscapeDataString(dto.OrganizerEmail)}/events/{Uri.EscapeDataString(eventId!)}")
+                {
+                    Content = new StringContent(patchBody.ToString(), System.Text.Encoding.UTF8, "application/json")
+                };
+
+                var resp = await httpClient.SendAsync(req);
+                if (!resp.IsSuccessStatusCode)
+                {
+                    var body = await resp.Content.ReadAsStringAsync();
+                    return StatusCode((int)resp.StatusCode, new { status = "failure", message = "Graph update failed", details = body });
+                }
+
+                return Ok(new { status = "success", message = "Meeting updated." });
+            }
+            catch (MsalServiceException msalEx)
+            {
+                _logger.LogError(msalEx, "Azure AD token acquisition failed (admin override).");
+                return StatusCode(500, new { status = "failure", message = "Azure AD token acquisition failed." });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Unexpected error in PatchMeeting");
+                return StatusCode(500, new { status = "failure", message = "Internal server error", details = ex.Message });
+            }
+        }
+
+        private IActionResult StatusCode(object value)
+        {
+            throw new NotImplementedException();
         }
     }
 }
