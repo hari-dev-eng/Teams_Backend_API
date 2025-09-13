@@ -10,6 +10,7 @@ using System.Collections.Generic;
 using Microsoft.AspNetCore.Http;
 using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
+using Teams_Backend_API.Models.DTOs;
 
 namespace OutLook_Events
 {
@@ -419,12 +420,6 @@ namespace OutLook_Events
             }
         }
 
-        public class PatchMeetingDto
-        {
-            public string? Subject { get; set; }
-            public string OrganizerEmail { get; set; } = "";
-        }
-
         [HttpPatch("by-ical/{icalUid}")]
         public async Task<IActionResult> PatchMeeting(string icalUid, [FromBody] PatchMeetingDto dto)
         {
@@ -470,7 +465,45 @@ namespace OutLook_Events
 
                 // Apply partial update (subject only for now)
                 var patchBody = new JObject();
-                if (!string.IsNullOrWhiteSpace(dto.Subject)) patchBody["subject"] = dto.Subject.Trim();
+
+                // Subject
+                if (!string.IsNullOrWhiteSpace(dto.Subject))
+                    patchBody["subject"] = dto.Subject.Trim();
+
+                // Start + End Time (must be ISO strings)
+                if (!string.IsNullOrWhiteSpace(dto.StartTime) && !string.IsNullOrWhiteSpace(dto.EndTime))
+                {
+                    patchBody["start"] = new JObject
+                    {
+                        ["dateTime"] = dto.StartTime,
+                        ["timeZone"] = "India Standard Time"
+                    };
+                    patchBody["end"] = new JObject
+                    {
+                        ["dateTime"] = dto.EndTime,
+                        ["timeZone"] = "India Standard Time"
+                    };
+                }
+
+                // Attendees
+                if (dto.Attendees != null && dto.Attendees.Count > 0)
+                {
+                    var jAttendees = new JArray();
+                    foreach (var a in dto.Attendees)
+                    {
+                        var attendeeObj = new JObject
+                        {
+                            ["emailAddress"] = new JObject
+                            {
+                                ["address"] = a.Email,
+                                ["name"] = string.IsNullOrWhiteSpace(a.Name) ? a.Email : a.Name
+                            },
+                            ["type"] = "required"
+                        };
+                        jAttendees.Add(attendeeObj);
+                    }
+                    patchBody["attendees"] = jAttendees;
+                }
 
                 if (!patchBody.HasValues)
                     return BadRequest(new { status = "failure", message = "No changes to apply." });
