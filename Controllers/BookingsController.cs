@@ -328,17 +328,40 @@ public class BookingsController : ControllerBase
     {
         try
         {
-            var photoStream = await _graphClient.Users[email].Photo.Content.GetAsync();
-            if (photoStream == null) return NotFound();
+            var user = await _graphClient.Users[email]
+                .GetAsync(req => req.QueryParameters.Select =
+                    new[] { "id", "displayName", "mail", "jobTitle", "officeLocation", "mobilePhone" });
 
-            using var ms = new MemoryStream();
-            await photoStream.CopyToAsync(ms);
-            var base64 = Convert.ToBase64String(ms.ToArray());
-            return Ok(new { image = $"data:image/jpeg;base64,{base64}" });
+            if (user == null) return NotFound();
+
+            // Photo
+            string? base64Photo = null;
+            try
+            {
+                var photoStream = await _graphClient.Users[email].Photo.Content.GetAsync();
+                if (photoStream != null)
+                {
+                    using var ms = new MemoryStream();
+                    await photoStream.CopyToAsync(ms);
+                    base64Photo = $"data:image/jpeg;base64,{Convert.ToBase64String(ms.ToArray())}";
+                }
+            }
+            catch { }
+
+            return Ok(new
+            {
+                id = user.Id,
+                displayName = user.DisplayName,
+                mail = user.Mail ?? user.UserPrincipalName,
+                jobTitle = user.JobTitle,
+                officeLocation = user.OfficeLocation,
+                mobilePhone = user.MobilePhone,
+                photo = base64Photo
+            });
         }
         catch (Exception ex)
         {
-            return NotFound(new { error = $"No photo found for {email}. {ex.Message}" });
+            return BadRequest(new { error = ex.Message });
         }
     }
 
