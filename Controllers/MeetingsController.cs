@@ -20,13 +20,6 @@ namespace OutLook_Events
     {
         private static readonly string OrgDomain = "conservesolution.com";
 
-        // <<< STATIC ADMIN EMAILS (super-admins) >>>
-        private static readonly HashSet<string> AdminEmails = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-        {
-            "hariprasath.c@conservesolution.com",
-            "madhanraj@conservesolution.com",
-        };
-
         private readonly IConfiguration _config;
         private readonly ILogger<MeetingsController> _logger;
         private readonly IHttpClientFactory _httpClientFactory;
@@ -67,7 +60,6 @@ namespace OutLook_Events
             {
                 var handler = new JwtSecurityTokenHandler();
                 var token = handler.ReadJwtToken(jwt);
-                // Common email-ish claims Microsoft issues
                 var email = token.Claims.FirstOrDefault(c =>
                                 c.Type.Equals("preferred_username", StringComparison.OrdinalIgnoreCase) ||
                                 c.Type.Equals("upn", StringComparison.OrdinalIgnoreCase) ||
@@ -78,6 +70,40 @@ namespace OutLook_Events
                 return email?.ToLowerInvariant();
             }
             catch { return null; }
+        }
+
+        // Dynamic admin check using Graph
+        private async Task<bool> IsUserAdminAsync(string jwt)
+        {
+            try
+            {
+                using var httpClient = _httpClientFactory.CreateClient();
+                httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", jwt);
+
+                // Get signed-in user
+                var meResp = await httpClient.GetAsync("https://graph.microsoft.com/v1.0/me");
+                if (!meResp.IsSuccessStatusCode) return false;
+
+                var meJson = JObject.Parse(await meResp.Content.ReadAsStringAsync());
+                var userId = meJson["id"]?.ToString();
+                if (string.IsNullOrEmpty(userId)) return false;
+
+                // Get role memberships
+                var roleResp = await httpClient.GetAsync($"https://graph.microsoft.com/v1.0/users/{userId}/memberOf");
+                if (!roleResp.IsSuccessStatusCode) return false;
+
+                var roleJson = JObject.Parse(await roleResp.Content.ReadAsStringAsync());
+                var roles = roleJson["value"]?.Select(r => r["displayName"]?.ToString() ?? "").ToList();
+
+                return roles != null && roles.Any(r =>
+                    r.Equals("Company Administrator", StringComparison.OrdinalIgnoreCase) ||
+                    r.Equals("Global Administrator", StringComparison.OrdinalIgnoreCase));
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to check admin role.");
+                return false;
+            }
         }
 
         [HttpGet]
@@ -333,7 +359,7 @@ namespace OutLook_Events
             var lookupJson = JObject.Parse(await lookupResp.Content.ReadAsStringAsync());
             var organizerEventId = lookupJson["value"]?.FirstOrDefault()?["id"]?.ToString();
             if (string.IsNullOrEmpty(organizerEventId))
-                return (false, null, "Event not found in organizer’s mailbox", 404);
+                return (false, null, "Event not found in organizer's mailbox", 404);
             return (true, organizerEventId, null, 200);
         }
 
@@ -355,14 +381,14 @@ namespace OutLook_Events
                 return Unauthorized(new { status = "failure", message = "Missing user access token." });
 
             var callerEmail = GetEmailFromJwt(jwt);
-            var isAdmin = callerEmail != null && AdminEmails.Contains(callerEmail);
+            var isAdmin = await IsUserAdminAsync(jwt);
             var isOrgMail = callerEmail != null && callerEmail.EndsWith($"@{OrgDomain}", StringComparison.OrdinalIgnoreCase);
+
             if (!isAdmin && !isOrgMail)
-                return StatusCode(new { status = "failure", message = $"Please sign in with your @{OrgDomain} account." });
+                return Unauthorized(new { status = "failure", message = $"Please sign in with your @{OrgDomain} account." });
 
             try
             {
-                // choose token: admin => app-only; else => user delegated
                 HttpClient httpClient = _httpClientFactory.CreateClient();
                 if (isAdmin)
                 {
@@ -376,27 +402,23 @@ namespace OutLook_Events
                     httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", jwt);
                 }
 
-                // find the event id in organizer’s mailbox
                 var (ok, eventId, error, status) = await FindOrganizerEventId(httpClient, organizerEmail, icalUid);
                 if (!ok) return StatusCode(status, new { status = "failure", message = "Lookup failed", details = error });
 
-                // (Optional) non-admins cannot delete completed meetings
-                if (!isAdmin)
+                if (!isAdmin && !string.Equals(callerEmail, organizerEmail, StringComparison.OrdinalIgnoreCase))
+                    return Unauthorized(new { status = "failure", message = "Only the organizer or an admin can delete this meeting." });
+
+                var evUrl = $"https://graph.microsoft.com/v1.0/users/{Uri.EscapeDataString(organizerEmail)}/events/{Uri.EscapeDataString(eventId!)}?$select=start,end";
+                var evResp = await httpClient.GetAsync(evUrl);
+                if (evResp.IsSuccessStatusCode)
                 {
-                    // fetch event to verify dates (very cheap call)
-                    var evUrl = $"https://graph.microsoft.com/v1.0/users/{Uri.EscapeDataString(organizerEmail)}/events/{Uri.EscapeDataString(eventId!)}?$select=start,end";
-                    var evResp = await httpClient.GetAsync(evUrl);
-                    if (evResp.IsSuccessStatusCode)
-                    {
-                        var obj = JObject.Parse(await evResp.Content.ReadAsStringAsync());
-                        var startIso = obj.SelectToken("start.dateTime")?.ToString() ?? "";
-                        var endIso = obj.SelectToken("end.dateTime")?.ToString() ?? "";
-                        if (IsCompleted(startIso, endIso))
-                            return StatusCode(new { status = "failure", message = "Completed meetings cannot be deleted by non-admins." });
-                    }
+                    var obj = JObject.Parse(await evResp.Content.ReadAsStringAsync());
+                    var startIso = obj.SelectToken("start.dateTime")?.ToString() ?? "";
+                    var endIso = obj.SelectToken("end.dateTime")?.ToString() ?? "";
+                    if (!isAdmin && IsCompleted(startIso, endIso))
+                        return Unauthorized(new { status = "failure", message = "Completed meetings cannot be deleted by non-admins." });
                 }
 
-                // delete
                 var deleteUrl = $"https://graph.microsoft.com/v1.0/users/{Uri.EscapeDataString(organizerEmail)}/events/{Uri.EscapeDataString(eventId!)}";
                 var deleteResp = await httpClient.DeleteAsync(deleteUrl);
 
@@ -435,10 +457,11 @@ namespace OutLook_Events
                 return Unauthorized(new { status = "failure", message = "Missing user access token." });
 
             var callerEmail = GetEmailFromJwt(jwt);
-            var isAdmin = callerEmail != null && AdminEmails.Contains(callerEmail);
+            var isAdmin = await IsUserAdminAsync(jwt);
             var isOrgMail = callerEmail != null && callerEmail.EndsWith($"@{OrgDomain}", StringComparison.OrdinalIgnoreCase);
+
             if (!isAdmin && !isOrgMail)
-                return StatusCode(new { status = "failure", message = $"Please sign in with your @{OrgDomain} account." });
+                return Unauthorized(new { status = "failure", message = $"Please sign in with your @{OrgDomain} account." });
 
             try
             {
@@ -455,34 +478,18 @@ namespace OutLook_Events
                     httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", jwt);
                 }
 
-                // find event id
                 var (ok, eventId, error, status) = await FindOrganizerEventId(httpClient, dto.OrganizerEmail, icalUid);
                 if (!ok) return StatusCode(status, new { status = "failure", message = "Lookup failed", details = error });
 
-                // if not admin, ensure caller is organizer
                 if (!isAdmin && !string.Equals(callerEmail, dto.OrganizerEmail, StringComparison.OrdinalIgnoreCase))
-                    return StatusCode(new { status = "failure", message = "Only the organizer or an admin can edit this meeting." });
+                    return Unauthorized(new { status = "failure", message = "Only the organizer or an admin can edit this meeting." });
 
-                // Apply partial update (subject only for now)
                 var patchBody = new JObject();
-
-                // Subject
-                if (!string.IsNullOrWhiteSpace(dto.Subject))
-                    patchBody["subject"] = dto.Subject.Trim();
-
-                // Start + End Time (must be ISO strings)
+                if (!string.IsNullOrWhiteSpace(dto.Subject)) patchBody["subject"] = dto.Subject.Trim();
                 if (!string.IsNullOrWhiteSpace(dto.StartTime) && !string.IsNullOrWhiteSpace(dto.EndTime))
                 {
-                    patchBody["start"] = new JObject
-                    {
-                        ["dateTime"] = dto.StartTime,
-                        ["timeZone"] = "India Standard Time"
-                    };
-                    patchBody["end"] = new JObject
-                    {
-                        ["dateTime"] = dto.EndTime,
-                        ["timeZone"] = "India Standard Time"
-                    };
+                    patchBody["start"] = new JObject { ["dateTime"] = dto.StartTime, ["timeZone"] = "India Standard Time" };
+                    patchBody["end"] = new JObject { ["dateTime"] = dto.EndTime, ["timeZone"] = "India Standard Time" };
                 }
 
                 if (!patchBody.HasValues)
@@ -513,11 +520,6 @@ namespace OutLook_Events
                 _logger.LogError(ex, "Unexpected error in PatchMeeting");
                 return StatusCode(500, new { status = "failure", message = "Internal server error", details = ex.Message });
             }
-        }
-
-        private IActionResult StatusCode(object value)
-        {
-            throw new NotImplementedException();
         }
     }
 }
