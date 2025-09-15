@@ -322,6 +322,25 @@ public class BookingsController : ControllerBase
             return BadRequest(new { error = errorDetails });
         }
     }
+    // grtting profile photo from graph api
+    [HttpGet("GetUserPhoto")]
+    public async Task<IActionResult> GetUserPhoto([FromQuery] string email)
+    {
+        try
+        {
+            var photoStream = await _graphClient.Users[email].Photo.Content.GetAsync();
+            if (photoStream == null) return NotFound();
+
+            using var ms = new MemoryStream();
+            await photoStream.CopyToAsync(ms);
+            var base64 = Convert.ToBase64String(ms.ToArray());
+            return Ok(new { image = $"data:image/jpeg;base64,{base64}" });
+        }
+        catch (Exception ex)
+        {
+            return NotFound(new { error = $"No photo found for {email}. {ex.Message}" });
+        }
+    }
 
     [HttpGet("GetAccessToken")]
     public async Task<IActionResult> GetAccessToken()
