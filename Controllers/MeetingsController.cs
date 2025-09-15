@@ -485,26 +485,6 @@ namespace OutLook_Events
                     };
                 }
 
-                // Attendees
-                if (dto.Attendees != null && dto.Attendees.Count > 0)
-                {
-                    var jAttendees = new JArray();
-                    foreach (var a in dto.Attendees)
-                    {
-                        var attendeeObj = new JObject
-                        {
-                            ["emailAddress"] = new JObject
-                            {
-                                ["address"] = a.Email,
-                                ["name"] = string.IsNullOrWhiteSpace(a.Name) ? a.Email : a.Name
-                            },
-                            ["type"] = "required"
-                        };
-                        jAttendees.Add(attendeeObj);
-                    }
-                    patchBody["attendees"] = jAttendees;
-                }
-
                 if (!patchBody.HasValues)
                     return BadRequest(new { status = "failure", message = "No changes to apply." });
 
