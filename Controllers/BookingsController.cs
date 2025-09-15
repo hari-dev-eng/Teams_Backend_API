@@ -322,46 +322,23 @@ public class BookingsController : ControllerBase
             return BadRequest(new { error = errorDetails });
         }
     }
-    // grtting profile photo from graph api
+    // getting profile photo from graph api
     [HttpGet("GetUserPhoto")]
     public async Task<IActionResult> GetUserPhoto([FromQuery] string email)
     {
         try
         {
-            var user = await _graphClient.Users[email]
-                .GetAsync(req => req.QueryParameters.Select =
-                    new[] { "id", "displayName", "mail", "jobTitle", "officeLocation", "mobilePhone" });
+            var photoStream = await _graphClient.Users[email].Photo.Content.GetAsync();
+            if (photoStream == null) return NotFound();
 
-            if (user == null) return NotFound();
-
-            // Photo
-            string? base64Photo = null;
-            try
-            {
-                var photoStream = await _graphClient.Users[email].Photo.Content.GetAsync();
-                if (photoStream != null)
-                {
-                    using var ms = new MemoryStream();
-                    await photoStream.CopyToAsync(ms);
-                    base64Photo = $"data:image/jpeg;base64,{Convert.ToBase64String(ms.ToArray())}";
-                }
-            }
-            catch { }
-
-            return Ok(new
-            {
-                id = user.Id,
-                displayName = user.DisplayName,
-                mail = user.Mail ?? user.UserPrincipalName,
-                jobTitle = user.JobTitle,
-                officeLocation = user.OfficeLocation,
-                mobilePhone = user.MobilePhone,
-                photo = base64Photo
-            });
+            using var ms = new MemoryStream();
+            await photoStream.CopyToAsync(ms);
+            var base64 = Convert.ToBase64String(ms.ToArray());
+            return Ok(new { image = $"data:image/jpeg;base64,{base64}" });
         }
         catch (Exception ex)
         {
-            return BadRequest(new { error = ex.Message });
+            return NotFound(new { error = $"No photo found for {email}. {ex.Message}" });
         }
     }
 
