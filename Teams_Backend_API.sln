@@ -3,7 +3,7 @@ Microsoft Visual Studio Solution File, Format Version 12.00
 # Visual Studio Version 17
 VisualStudioVersion = 17.13.35931.197
 MinimumVisualStudioVersion = 10.0.40219.1
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Teams_Backend_API", "Teams_Backend_API.csproj", "{407C2611-954B-49AF-B4BB-67A9EB6588A7}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Meetly_backend", "Meetly_backend.csproj", "{407C2611-954B-49AF-B4BB-67A9EB6588A7}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
